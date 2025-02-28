@@ -1,5 +1,7 @@
+use std::str::FromStr;
+
 use masking::Secret;
-use router::types::{self, api, storage::enums};
+use router::types::{self, domain, storage::enums};
 
 use crate::{
     connector_auth,
@@ -11,18 +13,20 @@ impl ConnectorActions for Stripe {}
 impl utils::Connector for Stripe {
     fn get_data(&self) -> types::api::ConnectorData {
         use router::connector::Stripe;
-        types::api::ConnectorData {
-            connector: Box::new(&Stripe),
-            connector_name: types::Connector::Stripe,
-            get_token: types::api::GetToken::Connector,
-        }
+        utils::construct_connector_data_old(
+            Box::new(Stripe::new()),
+            types::Connector::Stripe,
+            types::api::GetToken::Connector,
+            None,
+        )
     }
 
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .stripe
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration")
+                .into(),
         )
     }
 
@@ -33,8 +37,8 @@ impl utils::Connector for Stripe {
 
 fn get_payment_authorize_data() -> Option<types::PaymentsAuthorizeData> {
     Some(types::PaymentsAuthorizeData {
-        payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-            card_number: Secret::new("4242424242424242".to_string()),
+        payment_method_data: domain::PaymentMethodData::Card(domain::Card {
+            card_number: cards::CardNumber::from_str("4242424242424242").unwrap(),
             ..utils::CCardType::default().0
         }),
         ..utils::PaymentAuthorizeType::default().0
@@ -75,7 +79,7 @@ async fn should_partially_capture_already_authorized_payment() {
         .authorize_and_capture_payment(
             get_payment_authorize_data(),
             Some(types::PaymentsCaptureData {
-                amount_to_capture: Some(50),
+                amount_to_capture: 50,
                 ..utils::PaymentCaptureType::default().0
             }),
             None,
@@ -96,7 +100,7 @@ async fn should_sync_authorized_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Authorized,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 ..Default::default()
@@ -120,7 +124,7 @@ async fn should_sync_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Charged,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 ..Default::default()
@@ -154,8 +158,8 @@ async fn should_fail_payment_for_incorrect_card_number() {
     let response = Stripe {}
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new("4024007134364842".to_string()),
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
+                    card_number: cards::CardNumber::from_str("4024007134364842").unwrap(),
                     ..utils::CCardType::default().0
                 }),
                 ..utils::PaymentAuthorizeType::default().0
@@ -166,30 +170,8 @@ async fn should_fail_payment_for_incorrect_card_number() {
         .unwrap();
     let x = response.response.unwrap_err();
     assert_eq!(
-        x.message,
+        x.reason.unwrap(),
         "Your card was declined. Your request was in test mode, but used a non test (live) card. For a list of valid test cards, visit: https://stripe.com/docs/testing.",
-    );
-}
-
-#[actix_web::test]
-async fn should_fail_payment_for_no_card_number() {
-    let response = Stripe {}
-        .make_payment(
-            Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new("".to_string()),
-                    ..utils::CCardType::default().0
-                }),
-                ..utils::PaymentAuthorizeType::default().0
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let x = response.response.unwrap_err();
-    assert_eq!(
-        x.message,
-        "You passed an empty string for 'payment_method_data[card][number]'. We assume empty values are an attempt to unset a parameter; however 'payment_method_data[card][number]' cannot be unset. You should remove 'payment_method_data[card][number]' from your request or supply a non-empty value.",
     );
 }
 
@@ -198,7 +180,7 @@ async fn should_fail_payment_for_invalid_exp_month() {
     let response = Stripe {}
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_month: Secret::new("13".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -209,7 +191,10 @@ async fn should_fail_payment_for_invalid_exp_month() {
         .await
         .unwrap();
     let x = response.response.unwrap_err();
-    assert_eq!(x.message, "Your card's expiration month is invalid.",);
+    assert_eq!(
+        x.reason.unwrap(),
+        "Your card's expiration month is invalid.",
+    );
 }
 
 #[actix_web::test]
@@ -217,7 +202,7 @@ async fn should_fail_payment_for_invalid_exp_year() {
     let response = Stripe {}
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_year: Secret::new("2022".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -228,7 +213,7 @@ async fn should_fail_payment_for_invalid_exp_year() {
         .await
         .unwrap();
     let x = response.response.unwrap_err();
-    assert_eq!(x.message, "Your card's expiration year is invalid.",);
+    assert_eq!(x.reason.unwrap(), "Your card's expiration year is invalid.",);
 }
 
 #[actix_web::test]
@@ -236,7 +221,7 @@ async fn should_fail_payment_for_invalid_card_cvc() {
     let response = Stripe {}
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_cvc: Secret::new("12".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -247,7 +232,7 @@ async fn should_fail_payment_for_invalid_card_cvc() {
         .await
         .unwrap();
     let x = response.response.unwrap_err();
-    assert_eq!(x.message, "Your card's security code is invalid.",);
+    assert_eq!(x.reason.unwrap(), "Your card's security code is invalid.",);
 }
 
 // Voids a payment using automatic capture flow (Non 3DS).
@@ -269,7 +254,7 @@ async fn should_fail_void_payment_for_auto_capture() {
         .await
         .unwrap();
     assert_eq!(
-        void_response.response.unwrap_err().message,
+        void_response.response.unwrap_err().reason.unwrap(),
         "You cannot cancel this PaymentIntent because it has a status of succeeded. Only a PaymentIntent with one of the following statuses may be canceled: requires_payment_method, requires_capture, requires_confirmation, requires_action, processing."
     );
 }
@@ -282,7 +267,10 @@ async fn should_fail_capture_for_invalid_payment() {
         .await
         .unwrap();
     let err = response.response.unwrap_err();
-    assert_eq!(err.message, "No such payment_intent: '12345'".to_string());
+    assert_eq!(
+        err.reason.unwrap(),
+        "No such payment_intent: '12345'".to_string()
+    );
     assert_eq!(err.code, "resource_missing".to_string());
 }
 
@@ -382,7 +370,7 @@ async fn should_fail_refund_for_invalid_amount() {
         .await
         .unwrap();
     assert_eq!(
-        response.response.unwrap_err().message,
+        response.response.unwrap_err().reason.unwrap(),
         "Refund amount ($1.50) is greater than charge amount ($1.00)",
     );
 }

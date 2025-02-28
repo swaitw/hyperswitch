@@ -1,8 +1,7 @@
+use std::str::FromStr;
+
 use masking::Secret;
-use router::types::{
-    self, api,
-    storage::{self, enums},
-};
+use router::types::{self, storage::enums};
 use serde_json::json;
 
 use crate::{
@@ -16,18 +15,20 @@ impl ConnectorActions for NuveiTest {}
 impl utils::Connector for NuveiTest {
     fn get_data(&self) -> types::api::ConnectorData {
         use router::connector::Nuvei;
-        types::api::ConnectorData {
-            connector: Box::new(&Nuvei),
-            connector_name: types::Connector::Nuvei,
-            get_token: types::api::GetToken::Connector,
-        }
+        utils::construct_connector_data_old(
+            Box::new(&Nuvei),
+            types::Connector::Nuvei,
+            types::api::GetToken::Connector,
+            None,
+        )
     }
 
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .nuvei
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration")
+                .into(),
         )
     }
 
@@ -40,8 +41,8 @@ static CONNECTOR: NuveiTest = NuveiTest {};
 
 fn get_payment_data() -> Option<types::PaymentsAuthorizeData> {
     Some(types::PaymentsAuthorizeData {
-        payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-            card_number: Secret::new(String::from("4444 3333 2222 1111")),
+        payment_method_data: types::domain::PaymentMethodData::Card(types::domain::Card {
+            card_number: cards::CardNumber::from_str("4444 3333 2222 1111").unwrap(),
             ..utils::CCardType::default().0
         }),
         ..utils::PaymentAuthorizeType::default().0
@@ -76,7 +77,7 @@ async fn should_partially_capture_authorized_payment() {
         .authorize_and_capture_payment(
             get_payment_data(),
             Some(types::PaymentsCaptureData {
-                amount_to_capture: Some(50),
+                amount_to_capture: 50,
                 ..utils::PaymentCaptureType::default().0
             }),
             None,
@@ -98,7 +99,7 @@ async fn should_sync_authorized_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Authorized,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 connector_meta: Some(json!({
@@ -122,7 +123,7 @@ async fn should_void_authorized_payment() {
             Some(types::PaymentsCancelData {
                 cancellation_reason: Some("requested_by_customer".to_string()),
                 amount: Some(100),
-                currency: Some(storage::enums::Currency::USD),
+                currency: Some(enums::Currency::USD),
                 ..Default::default()
             }),
             None,
@@ -190,7 +191,7 @@ async fn should_sync_auto_captured_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Charged,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 connector_meta: Some(json!({
@@ -238,15 +239,15 @@ async fn should_partially_refund_succeeded_payment() {
     );
 }
 
-// Cards Negative scenerios
+// Cards Negative scenarios
 // Creates a payment with incorrect card number.
 #[actix_web::test]
 async fn should_fail_payment_for_incorrect_card_number() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new("1234567891011".to_string()),
+                payment_method_data: types::domain::PaymentMethodData::Card(types::domain::Card {
+                    card_number: cards::CardNumber::from_str("1234567891011").unwrap(),
                     ..utils::CCardType::default().0
                 }),
                 ..utils::PaymentAuthorizeType::default().0
@@ -261,36 +262,13 @@ async fn should_fail_payment_for_incorrect_card_number() {
     );
 }
 
-// Creates a payment with empty card number.
-#[actix_web::test]
-async fn should_fail_payment_for_empty_card_number() {
-    let response = CONNECTOR
-        .make_payment(
-            Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new(String::from("")),
-                    ..utils::CCardType::default().0
-                }),
-                ..utils::PaymentAuthorizeType::default().0
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let x = response.response.unwrap_err();
-    assert_eq!(
-        x.message,
-        "Missing or invalid CardData data. Missing card number.",
-    );
-}
-
 // Creates a payment with incorrect CVC.
 #[actix_web::test]
 async fn should_fail_payment_for_incorrect_cvc() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: types::domain::PaymentMethodData::Card(types::domain::Card {
                     card_cvc: Secret::new("12345".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -312,7 +290,7 @@ async fn should_fail_payment_for_invalid_exp_month() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: types::domain::PaymentMethodData::Card(types::domain::Card {
                     card_exp_month: Secret::new("20".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -334,8 +312,8 @@ async fn should_succeed_payment_for_incorrect_expiry_year() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new(String::from("4000027891380961")),
+                payment_method_data: types::domain::PaymentMethodData::Card(types::domain::Card {
+                    card_number: cards::CardNumber::from_str("4000027891380961").unwrap(),
                     card_exp_year: Secret::new("2000".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -364,7 +342,7 @@ async fn should_fail_void_payment_for_auto_capture() {
             Some(types::PaymentsCancelData {
                 cancellation_reason: Some("requested_by_customer".to_string()),
                 amount: Some(100),
-                currency: Some(storage::enums::Currency::USD),
+                currency: Some(enums::Currency::USD),
                 ..Default::default()
             }),
             None,

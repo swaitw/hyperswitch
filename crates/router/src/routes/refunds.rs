@@ -3,8 +3,8 @@ use router_env::{instrument, tracing, Flow};
 
 use super::app::AppState;
 use crate::{
-    core::refunds::*,
-    services::{api, authentication as auth},
+    core::{api_locking, refunds::*},
+    services::{api, authentication as auth, authorization::permissions::Permission},
     types::api::refunds,
 };
 
@@ -31,17 +31,31 @@ pub async fn refunds_create(
     json_payload: web::Json<refunds::RefundRequest>,
 ) -> HttpResponse {
     let flow = Flow::RefundsCreate;
-    api::server_wrap(
+    Box::pin(api::server_wrap(
         flow,
-        state.get_ref(),
+        state,
         &req,
         json_payload.into_inner(),
-        refund_create_core,
-        &auth::ApiKeyAuth,
-    )
+        |state, auth: auth::AuthenticationData, req, _| {
+            refund_create_core(
+                state,
+                auth.merchant_account,
+                auth.profile_id,
+                auth.key_store,
+                req,
+            )
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::ProfileRefundWrite,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
     .await
 }
-
 /// Refunds - Retrieve (GET)
 ///
 /// To retrieve the properties of a Refund. This may be used to get the status of a previously initiated payment or next action for an ongoing payment
@@ -59,37 +73,52 @@ pub async fn refunds_create(
     operation_id = "Retrieve a Refund",
     security(("api_key" = []))
 )]
-#[instrument(skip_all, fields(flow = ?Flow::RefundsRetrieve))]
+#[instrument(skip_all, fields(flow))]
 // #[get("/{id}")]
 pub async fn refunds_retrieve(
     state: web::Data<AppState>,
     req: HttpRequest,
     path: web::Path<String>,
+    query_params: web::Query<api_models::refunds::RefundsRetrieveBody>,
 ) -> HttpResponse {
     let refund_request = refunds::RefundsRetrieveRequest {
         refund_id: path.into_inner(),
+        force_sync: query_params.force_sync,
         merchant_connector_details: None,
     };
-    let flow = Flow::RefundsRetrieve;
+    let flow = match query_params.force_sync {
+        Some(true) => Flow::RefundsRetrieveForceSync,
+        _ => Flow::RefundsRetrieve,
+    };
 
-    api::server_wrap(
+    tracing::Span::current().record("flow", flow.to_string());
+
+    Box::pin(api::server_wrap(
         flow,
-        state.get_ref(),
+        state,
         &req,
         refund_request,
-        |state, merchant_account, refund_request| {
+        |state, auth: auth::AuthenticationData, refund_request, _| {
             refund_response_wrapper(
                 state,
-                merchant_account,
+                auth.merchant_account,
+                auth.profile_id,
+                auth.key_store,
                 refund_request,
-                refund_retrieve_core,
+                refund_retrieve_core_with_refund_id,
             )
         },
-        &auth::ApiKeyAuth,
-    )
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::ProfileRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
     .await
 }
-
 /// Refunds - Retrieve (POST)
 ///
 /// To retrieve the properties of a Refund. This may be used to get the status of a previously initiated payment or next action for an ongoing payment
@@ -104,27 +133,40 @@ pub async fn refunds_retrieve(
     operation_id = "Retrieve a Refund",
     security(("api_key" = []))
 )]
-#[instrument(skip_all, fields(flow = ?Flow::RefundsRetrieve))]
+#[instrument(skip_all, fields(flow))]
 // #[post("/sync")]
 pub async fn refunds_retrieve_with_body(
     state: web::Data<AppState>,
     req: HttpRequest,
     json_payload: web::Json<refunds::RefundsRetrieveRequest>,
 ) -> HttpResponse {
-    let flow = Flow::RefundsRetrieve;
-    api::server_wrap(
+    let flow = match json_payload.force_sync {
+        Some(true) => Flow::RefundsRetrieveForceSync,
+        _ => Flow::RefundsRetrieve,
+    };
+
+    tracing::Span::current().record("flow", flow.to_string());
+
+    Box::pin(api::server_wrap(
         flow,
-        state.get_ref(),
+        state,
         &req,
         json_payload.into_inner(),
-        |state, merchant_account, req| {
-            refund_response_wrapper(state, merchant_account, req, refund_retrieve_core)
+        |state, auth: auth::AuthenticationData, req, _| {
+            refund_response_wrapper(
+                state,
+                auth.merchant_account,
+                auth.profile_id,
+                auth.key_store,
+                req,
+                refund_retrieve_core_with_refund_id,
+            )
         },
-        &auth::ApiKeyAuth,
-    )
+        &auth::HeaderAuth(auth::ApiKeyAuth),
+        api_locking::LockAction::NotApplicable,
+    ))
     .await
 }
-
 /// Refunds - Update
 ///
 /// To update the properties of a Refund object. This may include attaching a reason for the refund or metadata fields
@@ -152,38 +194,30 @@ pub async fn refunds_update(
     path: web::Path<String>,
 ) -> HttpResponse {
     let flow = Flow::RefundsUpdate;
-    let refund_id = path.into_inner();
-    api::server_wrap(
+    let mut refund_update_req = json_payload.into_inner();
+    refund_update_req.refund_id = path.into_inner();
+    Box::pin(api::server_wrap(
         flow,
-        state.get_ref(),
+        state,
         &req,
-        json_payload.into_inner(),
-        |state, merchant_account, req| {
-            refund_update_core(&*state.store, merchant_account, &refund_id, req)
+        refund_update_req,
+        |state, auth: auth::AuthenticationData, req, _| {
+            refund_update_core(state, auth.merchant_account, req)
         },
-        &auth::ApiKeyAuth,
-    )
+        &auth::HeaderAuth(auth::ApiKeyAuth),
+        api_locking::LockAction::NotApplicable,
+    ))
     .await
 }
-
 /// Refunds - List
 ///
 /// To list the refunds associated with a payment_id or with the merchant, if payment_id is not provided
 #[utoipa::path(
-    get,
+    post,
     path = "/refunds/list",
-    params(
-        ("payment_id" = String, Query, description = "The identifier for the payment"),
-        ("limit" = i64, Query, description = "Limit on the number of objects to return"),
-        ("created" = PrimitiveDateTime, Query, description = "The time at which refund is created"),
-        ("created_lt" = PrimitiveDateTime, Query, description = "Time less than the refund created time"),
-        ("created_gt" = PrimitiveDateTime, Query, description = "Time greater than the refund created time"),
-        ("created_lte" = PrimitiveDateTime, Query, description = "Time less than or equals to the refund created time"),
-        ("created_gte" = PrimitiveDateTime, Query, description = "Time greater than or equals to the refund created time")
-    ),
+    request_body=RefundListRequest,
     responses(
         (status = 200, description = "List of refunds", body = RefundListResponse),
-        (status = 404, description = "Refund does not exist in our records")
     ),
     tag = "Refunds",
     operation_id = "List all Refunds",
@@ -191,20 +225,284 @@ pub async fn refunds_update(
 )]
 #[instrument(skip_all, fields(flow = ?Flow::RefundsList))]
 #[cfg(feature = "olap")]
-// #[get("/list")]
 pub async fn refunds_list(
     state: web::Data<AppState>,
     req: HttpRequest,
-    payload: web::Query<api_models::refunds::RefundListRequest>,
+    payload: web::Json<api_models::refunds::RefundListRequest>,
 ) -> HttpResponse {
     let flow = Flow::RefundsList;
-    api::server_wrap(
+    Box::pin(api::server_wrap(
         flow,
-        state.get_ref(),
+        state,
         &req,
         payload.into_inner(),
-        |state, merchant_account, req| refund_list(&*state.store, merchant_account, req),
-        &auth::ApiKeyAuth,
-    )
+        |state, auth: auth::AuthenticationData, req, _| {
+            refund_list(state, auth.merchant_account, None, req)
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::MerchantRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
+    .await
+}
+
+/// Refunds - List at profile level
+///
+/// To list the refunds associated with a payment_id or with the merchant, if payment_id is not provided
+#[utoipa::path(
+    post,
+    path = "/refunds/profile/list",
+    request_body=RefundListRequest,
+    responses(
+        (status = 200, description = "List of refunds", body = RefundListResponse),
+    ),
+    tag = "Refunds",
+    operation_id = "List all Refunds",
+    security(("api_key" = []))
+)]
+#[instrument(skip_all, fields(flow = ?Flow::RefundsList))]
+#[cfg(feature = "olap")]
+pub async fn refunds_list_profile(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    payload: web::Json<api_models::refunds::RefundListRequest>,
+) -> HttpResponse {
+    let flow = Flow::RefundsList;
+    Box::pin(api::server_wrap(
+        flow,
+        state,
+        &req,
+        payload.into_inner(),
+        |state, auth: auth::AuthenticationData, req, _| {
+            refund_list(
+                state,
+                auth.merchant_account,
+                auth.profile_id.map(|profile_id| vec![profile_id]),
+                req,
+            )
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::ProfileRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
+    .await
+}
+
+/// Refunds - Filter
+///
+/// To list the refunds filters associated with list of connectors, currencies and payment statuses
+#[utoipa::path(
+    post,
+    path = "/refunds/filter",
+    request_body=TimeRange,
+    responses(
+        (status = 200, description = "List of filters", body = RefundListMetaData),
+    ),
+    tag = "Refunds",
+    operation_id = "List all filters for Refunds",
+    security(("api_key" = []))
+)]
+#[instrument(skip_all, fields(flow = ?Flow::RefundsList))]
+#[cfg(feature = "olap")]
+pub async fn refunds_filter_list(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    payload: web::Json<common_utils::types::TimeRange>,
+) -> HttpResponse {
+    let flow = Flow::RefundsList;
+    Box::pin(api::server_wrap(
+        flow,
+        state,
+        &req,
+        payload.into_inner(),
+        |state, auth: auth::AuthenticationData, req, _| {
+            refund_filter_list(state, auth.merchant_account, req)
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::MerchantRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
+    .await
+}
+
+/// Refunds - Filter V2
+///
+/// To list the refunds filters associated with list of connectors, currencies and payment statuses
+#[utoipa::path(
+    get,
+    path = "/refunds/v2/filter",
+    responses(
+        (status = 200, description = "List of static filters", body = RefundListFilters),
+    ),
+    tag = "Refunds",
+    operation_id = "List all filters for Refunds",
+    security(("api_key" = []))
+)]
+#[instrument(skip_all, fields(flow = ?Flow::RefundsFilters))]
+#[cfg(feature = "olap")]
+pub async fn get_refunds_filters(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    let flow = Flow::RefundsFilters;
+    Box::pin(api::server_wrap(
+        flow,
+        state,
+        &req,
+        (),
+        |state, auth: auth::AuthenticationData, _, _| {
+            get_filters_for_refunds(state, auth.merchant_account, None)
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::MerchantRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
+    .await
+}
+
+/// Refunds - Filter V2 at profile level
+///
+/// To list the refunds filters associated with list of connectors, currencies and payment statuses
+#[utoipa::path(
+    get,
+    path = "/refunds/v2/profile/filter",
+    responses(
+        (status = 200, description = "List of static filters", body = RefundListFilters),
+    ),
+    tag = "Refunds",
+    operation_id = "List all filters for Refunds",
+    security(("api_key" = []))
+)]
+#[instrument(skip_all, fields(flow = ?Flow::RefundsFilters))]
+#[cfg(feature = "olap")]
+pub async fn get_refunds_filters_profile(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> HttpResponse {
+    let flow = Flow::RefundsFilters;
+    Box::pin(api::server_wrap(
+        flow,
+        state,
+        &req,
+        (),
+        |state, auth: auth::AuthenticationData, _, _| {
+            get_filters_for_refunds(
+                state,
+                auth.merchant_account,
+                auth.profile_id.map(|profile_id| vec![profile_id]),
+            )
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::ProfileRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
+    .await
+}
+
+#[instrument(skip_all, fields(flow = ?Flow::RefundsAggregate))]
+#[cfg(feature = "olap")]
+pub async fn get_refunds_aggregates(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    query_params: web::Query<common_utils::types::TimeRange>,
+) -> HttpResponse {
+    let flow = Flow::RefundsAggregate;
+    let query_params = query_params.into_inner();
+    Box::pin(api::server_wrap(
+        flow,
+        state,
+        &req,
+        query_params,
+        |state, auth: auth::AuthenticationData, req, _| {
+            get_aggregates_for_refunds(state, auth.merchant_account, None, req)
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::MerchantRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
+    .await
+}
+
+#[instrument(skip_all, fields(flow = ?Flow::RefundsManualUpdate))]
+#[cfg(feature = "olap")]
+pub async fn refunds_manual_update(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    payload: web::Json<api_models::refunds::RefundManualUpdateRequest>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let flow = Flow::RefundsManualUpdate;
+    let mut refund_manual_update_req = payload.into_inner();
+    refund_manual_update_req.refund_id = path.into_inner();
+    Box::pin(api::server_wrap(
+        flow,
+        state,
+        &req,
+        refund_manual_update_req,
+        |state, _auth, req, _| refund_manual_update(state, req),
+        &auth::AdminApiAuth,
+        api_locking::LockAction::NotApplicable,
+    ))
+    .await
+}
+
+#[instrument(skip_all, fields(flow = ?Flow::RefundsAggregate))]
+#[cfg(feature = "olap")]
+pub async fn get_refunds_aggregate_profile(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    query_params: web::Query<common_utils::types::TimeRange>,
+) -> HttpResponse {
+    let flow = Flow::RefundsAggregate;
+    let query_params = query_params.into_inner();
+    Box::pin(api::server_wrap(
+        flow,
+        state,
+        &req,
+        query_params,
+        |state, auth: auth::AuthenticationData, req, _| {
+            get_aggregates_for_refunds(
+                state,
+                auth.merchant_account,
+                auth.profile_id.map(|profile_id| vec![profile_id]),
+                req,
+            )
+        },
+        auth::auth_type(
+            &auth::HeaderAuth(auth::ApiKeyAuth),
+            &auth::JWTAuth {
+                permission: Permission::ProfileRefundRead,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    ))
     .await
 }

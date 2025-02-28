@@ -1,29 +1,30 @@
 use masking::Secret;
-use router::types::{self, api, storage::enums};
+use router::{
+    types::{self, api, storage::enums,
+}};
 
-use crate::{
-    connector_auth,
-    utils::{self, ConnectorActions},
-};
+use crate::utils::{self, ConnectorActions};
+use test_utils::connector_auth;
 
 #[derive(Clone, Copy)]
 struct {{project-name | downcase | pascal_case}}Test;
 impl ConnectorActions for {{project-name | downcase | pascal_case}}Test {}
 impl utils::Connector for {{project-name | downcase | pascal_case}}Test {
-    fn get_data(&self) -> types::api::ConnectorData {
+    fn get_data(&self) -> api::ConnectorData {
         use router::connector::{{project-name | downcase | pascal_case}};
-        types::api::ConnectorData {
-            connector: Box::new(&{{project-name | downcase | pascal_case}}),
+        api::ConnectorData {
+            connector: Box::new({{project-name | downcase | pascal_case}}::new()),
             connector_name: types::Connector::{{project-name | downcase | pascal_case}},
             get_token: types::api::GetToken::Connector,
+            merchant_connector_id: None,
         }
     }
 
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .{{project-name | downcase}}
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration").into(),
         )
     }
 
@@ -70,7 +71,7 @@ async fn should_partially_capture_authorized_payment() {
         .authorize_and_capture_payment(
             payment_method_details(),
             Some(types::PaymentsCaptureData {
-                amount_to_capture: Some(50),
+                amount_to_capture: 50,
                 ..utils::PaymentCaptureType::default().0
             }),
             get_default_payment_info(),
@@ -92,7 +93,7 @@ async fn should_sync_authorized_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Authorized,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 ..Default::default()
@@ -196,7 +197,7 @@ async fn should_sync_auto_captured_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Charged,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 capture_method: Some(enums::CaptureMethod::Automatic),
@@ -279,52 +280,7 @@ async fn should_sync_refund() {
     );
 }
 
-// Cards Negative scenerios
-// Creates a payment with incorrect card number.
-#[actix_web::test]
-async fn should_fail_payment_for_incorrect_card_number() {
-    let response = CONNECTOR
-        .make_payment(
-            Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new("1234567891011".to_string()),
-                    ..utils::CCardType::default().0
-                }),
-                ..utils::PaymentAuthorizeType::default().0
-            }),
-            get_default_payment_info(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.response.unwrap_err().message,
-        "Your card number is incorrect.".to_string(),
-    );
-}
-
-// Creates a payment with empty card number.
-#[actix_web::test]
-async fn should_fail_payment_for_empty_card_number() {
-    let response = CONNECTOR
-        .make_payment(
-            Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new(String::from("")),
-                    ..utils::CCardType::default().0
-                }),
-                ..utils::PaymentAuthorizeType::default().0
-            }),
-            get_default_payment_info(),
-        )
-        .await
-        .unwrap();
-    let x = response.response.unwrap_err();
-    assert_eq!(
-        x.message,
-        "You passed an empty string for 'payment_method_data[card][number]'.",
-    );
-}
-
+// Cards Negative scenarios
 // Creates a payment with incorrect CVC.
 #[actix_web::test]
 async fn should_fail_payment_for_incorrect_cvc() {
@@ -353,7 +309,7 @@ async fn should_fail_payment_for_invalid_exp_month() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: api::PaymentMethodData::Card(api::Card {
                     card_exp_month: Secret::new("20".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -375,7 +331,7 @@ async fn should_fail_payment_for_incorrect_expiry_year() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: api::PaymentMethodData::Card(api::Card {
                     card_exp_year: Secret::new("2000".to_string()),
                     ..utils::CCardType::default().0
                 }),

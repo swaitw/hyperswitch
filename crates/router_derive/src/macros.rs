@@ -1,7 +1,13 @@
 pub(crate) mod api_error;
 pub(crate) mod diesel;
-mod helpers;
+pub(crate) mod generate_permissions;
+pub(crate) mod generate_schema;
+pub(crate) mod misc;
 pub(crate) mod operation;
+pub(crate) mod to_encryptable;
+pub(crate) mod try_get_enum;
+
+mod helpers;
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -9,10 +15,10 @@ use syn::DeriveInput;
 
 pub(crate) use self::{
     api_error::api_error_derive_inner,
-    diesel::{
-        diesel_enum_attribute_inner, diesel_enum_derive_inner, diesel_enum_text_derive_inner,
-    },
-    operation::operation_derive_inner,
+    diesel::{diesel_enum_derive_inner, diesel_enum_text_derive_inner},
+    generate_permissions::generate_permissions_inner,
+    generate_schema::polymorphic_macro_derive_inner,
+    to_encryptable::derive_to_encryption,
 };
 
 pub(crate) fn debug_as_display_inner(ast: &DeriveInput) -> syn::Result<TokenStream> {

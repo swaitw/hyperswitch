@@ -1,13 +1,8 @@
-//!
 //! Logger-specific config.
-//!
 
 use std::path::PathBuf;
 
 use serde::Deserialize;
-
-/// Directory of config toml files. Default is config
-pub const CONFIG_DIR: &str = "CONFIG_DIR";
 
 /// Config settings.
 #[derive(Debug, Deserialize, Clone)]
@@ -38,19 +33,21 @@ pub struct LogFile {
     pub path: String,
     /// Name of log file without suffix.
     pub file_name: String,
-    // pub do_async: bool, // is not used
     /// What gets into log files.
     pub level: Level,
+    /// Directive which sets the log level for one or more crates/modules.
+    pub filtering_directive: Option<String>,
+    // pub do_async: bool, // is not used
     // pub rotation: u16,
 }
 
 /// Describes the level of verbosity of a span or event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Level(pub(super) tracing::Level);
 
 impl Level {
     /// Returns the most verbose [`tracing::Level`]
-    pub fn into_level(&self) -> tracing::Level {
+    pub fn into_level(self) -> tracing::Level {
         self.0
     }
 }
@@ -80,27 +77,45 @@ pub struct LogConsole {
     /// Log format
     #[serde(default)]
     pub log_format: LogFormat,
+    /// Directive which sets the log level for one or more crates/modules.
+    pub filtering_directive: Option<String>,
 }
 
 /// Telemetry / tracing.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct LogTelemetry {
-    /// Whether tracing/telemetry is enabled.
-    pub enabled: bool,
+    /// Whether the traces pipeline is enabled.
+    pub traces_enabled: bool,
+    /// Whether the metrics pipeline is enabled.
+    pub metrics_enabled: bool,
+    /// Whether errors in setting up traces or metrics pipelines must be ignored.
+    pub ignore_errors: bool,
     /// Sampling rate for traces
     pub sampling_rate: Option<f64>,
+    /// Base endpoint URL to send metrics and traces to. Can optionally include the port number.
+    pub otel_exporter_otlp_endpoint: Option<String>,
+    /// Timeout (in milliseconds) for sending metrics and traces.
+    pub otel_exporter_otlp_timeout: Option<u64>,
+    /// Whether to use xray ID generator, (enable this if you plan to use AWS-XRAY)
+    pub use_xray_generator: bool,
+    /// Route Based Tracing
+    pub route_to_trace: Option<Vec<String>>,
+    /// Interval for collecting the metrics (such as gauge) in background thread
+    pub bg_metrics_collection_interval_in_secs: Option<u16>,
 }
 
 /// Telemetry / tracing.
 #[derive(Default, Debug, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum LogFormat {
     /// Default pretty log format
     Default,
     /// JSON based structured logging
     #[default]
     Json,
+    /// JSON based structured logging with pretty print
+    PrettyJson,
 }
 
 impl Config {
@@ -118,8 +133,8 @@ impl Config {
         // 1. Defaults from the implementation of the `Default` trait.
         // 2. Values from config file. The config file accessed depends on the environment
         //    specified by the `RUN_ENV` environment variable. `RUN_ENV` can be one of
-        //    `Development`, `Sandbox` or `Production`. If nothing is specified for `RUN_ENV`,
-        //    `/config/Development.toml` file is read.
+        //    `development`, `sandbox` or `production`. If nothing is specified for `RUN_ENV`,
+        //    `/config/development.toml` file is read.
         // 3. Environment variables prefixed with `ROUTER` and each level separated by double
         //    underscores.
         //
@@ -130,10 +145,12 @@ impl Config {
         let config_path = Self::config_path(&environment.to_string(), explicit_config_path);
 
         let config = Self::builder(&environment.to_string())?
-            .add_source(config::File::from(config_path).required(true))
+            .add_source(config::File::from(config_path).required(false))
             .add_source(config::Environment::with_prefix("ROUTER").separator("__"))
             .build()?;
 
+        // The logger may not yet be initialized when constructing the application configuration
+        #[allow(clippy::print_stderr)]
         serde_path_to_error::deserialize(config).map_err(|error| {
             crate::error!(%error, "Unable to deserialize configuration");
             eprintln!("Unable to deserialize application configuration: {error}");
@@ -158,17 +175,29 @@ impl Config {
         if let Some(explicit_config_path_val) = explicit_config_path {
             config_path.push(explicit_config_path_val);
         } else {
-            let config_directory = std::env::var(CONFIG_DIR).unwrap_or_else(|_| "config".into());
             let config_file_name = match environment {
-                "Production" => "Production.toml",
-                "Sandbox" => "Sandbox.toml",
-                _ => "Development.toml",
+                "production" => "production.toml",
+                "sandbox" => "sandbox.toml",
+                _ => "development.toml",
             };
 
-            config_path.push(crate::env::workspace_path());
+            let config_directory = Self::get_config_directory();
             config_path.push(config_directory);
             config_path.push(config_file_name);
         }
+        config_path
+    }
+
+    /// Get the Directory for the config file
+    /// Read the env variable `CONFIG_DIR` or fallback to `config`
+    pub fn get_config_directory() -> PathBuf {
+        let mut config_path = PathBuf::new();
+
+        let config_directory =
+            std::env::var(crate::env::vars::CONFIG_DIR).unwrap_or_else(|_| "config".into());
+
+        config_path.push(crate::env::workspace_path());
+        config_path.push(config_directory);
         config_path
     }
 }
