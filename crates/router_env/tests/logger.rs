@@ -1,29 +1,26 @@
 #![allow(clippy::unwrap_used)]
 
-use router_env as env;
 mod test_module;
-use env::TelemetryGuard;
-use test_module::some_module::*;
 
-fn logger() -> &'static TelemetryGuard {
+use ::config::ConfigError;
+use router_env::TelemetryGuard;
+
+use self::test_module::fn_with_colon;
+
+fn logger() -> error_stack::Result<&'static TelemetryGuard, ConfigError> {
     use once_cell::sync::OnceCell;
 
     static INSTANCE: OnceCell<TelemetryGuard> = OnceCell::new();
-    INSTANCE.get_or_init(|| {
-        let config = env::Config::new().unwrap();
+    Ok(INSTANCE.get_or_init(|| {
+        let config = router_env::Config::new().unwrap();
 
-        env::logger::setup(
-            &config.log,
-            env::service_name!(),
-            vec![env::service_name!()],
-        )
-        .unwrap()
-    })
+        router_env::setup(&config.log, "router_env_test", []).unwrap()
+    }))
 }
 
 #[tokio::test]
 async fn basic() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    logger();
+    logger()?;
 
     fn_with_colon(13).await;
 

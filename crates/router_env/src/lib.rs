@@ -1,12 +1,11 @@
-#![forbid(unsafe_code)]
-#![warn(missing_docs, missing_debug_implementations)]
+#![warn(missing_debug_implementations)]
 
-//!
 //! Environment of payment router: logger, basic config, its environment awareness.
-//!
 
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR" ), "/", "README.md"))]
 
+/// Utilities to identify members of the current cargo workspace.
+pub mod cargo_workspace;
 pub mod env;
 pub mod logger;
 pub mod metrics;
@@ -18,6 +17,7 @@ pub mod vergen;
 // pub use literally;
 #[doc(inline)]
 pub use logger::*;
+pub use once_cell;
 pub use opentelemetry;
 pub use tracing;
 #[cfg(feature = "actix_web")]

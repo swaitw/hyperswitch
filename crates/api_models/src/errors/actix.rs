@@ -17,6 +17,7 @@ impl actix_web::ResponseError for ApiErrorResponse {
             Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::DomainError(_) => StatusCode::OK,
         }
     }
 
@@ -25,8 +26,6 @@ impl actix_web::ResponseError for ApiErrorResponse {
 
         actix_web::HttpResponseBuilder::new(self.status_code())
             .insert_header((header::CONTENT_TYPE, mime::APPLICATION_JSON))
-            .insert_header((header::STRICT_TRANSPORT_SECURITY, "max-age=31536000"))
-            .insert_header((header::VIA, "Juspay_Router"))
             .body(self.to_string())
     }
 }
