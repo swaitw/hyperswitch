@@ -5,6 +5,9 @@ Environment of payment router: logger, basic config, its environment awareness.
 ## Example
 
 ```rust
+use router_env::logger;
+use tracing::{self, instrument};
+
 #[instrument]
 pub fn sample() -> () {
     logger::log!(
@@ -19,16 +22,3 @@ pub fn sample() -> () {
     );
 }
 ```
-
-## Files Tree Layout
-
-```text
-├── src                        : source code
-│   └── logger                 : logger
-└── tests                      : unit and integration tests
-    └── test_module            : unit and integration tests
-```
-
-<!--
-command to generate the tree `tree -L 3 -d`
--->

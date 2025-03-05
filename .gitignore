@@ -187,7 +187,7 @@ target/
 
 ### VisualStudioCode ###
 .vscode/*
-!.vscode/settings.json
+.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
@@ -241,6 +241,7 @@ $RECYCLE.BIN/
 # hyperswitch Project specific excludes
 # code coverage report
 *.profraw
+lcov.info
 html/
 coverage.json
 # other
@@ -249,10 +250,23 @@ logs/
 **/*.log
 **/*.log.*
 monitoring/*.tmp/
-config/Sandbox.toml
-config/Production.toml
+config/sandbox.toml
+config/production.toml
 !loadtest/.env
 loadtest/*.tmp/
 
 # Nix output
 result*
+
+.idea/
+
+# node_modules
+node_modules/
+
+# cypress credentials
+creds.json
+
+/.direnv
+
+# Nix services data
+/data
