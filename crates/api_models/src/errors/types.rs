@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use reqwest::StatusCode;
+use serde::Serialize;
 
 #[derive(Debug, serde::Serialize)]
 pub enum ErrorType {
@@ -15,6 +16,8 @@ pub struct ApiError {
     pub error_identifier: u16,
     pub error_message: String,
     pub extra: Option<Extra>,
+    #[cfg(feature = "detailed_errors")]
+    pub stacktrace: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -29,6 +32,8 @@ impl ApiError {
             error_identifier,
             error_message: error_message.to_string(),
             extra,
+            #[cfg(feature = "detailed_errors")]
+            stacktrace: None,
         }
     }
 }
@@ -41,6 +46,9 @@ struct ErrorResponse<'a> {
     code: String,
     #[serde(flatten)]
     extra: &'a Option<Extra>,
+    #[cfg(feature = "detailed_errors")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stacktrace: Option<&'a serde_json::Value>,
 }
 
 impl<'a> From<&'a ApiErrorResponse> for ErrorResponse<'a> {
@@ -52,6 +60,9 @@ impl<'a> From<&'a ApiErrorResponse> for ErrorResponse<'a> {
             message: Cow::Borrowed(value.get_internal_error().error_message.as_str()),
             error_type,
             extra: &error_info.extra,
+
+            #[cfg(feature = "detailed_errors")]
+            stacktrace: error_info.stacktrace.as_ref(),
         }
     }
 }
@@ -59,16 +70,19 @@ impl<'a> From<&'a ApiErrorResponse> for ErrorResponse<'a> {
 #[derive(Debug, serde::Serialize, Default, Clone)]
 pub struct Extra {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub payment_id: Option<String>,
+    pub payment_id: Option<common_utils::id_type::PaymentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector_transaction_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "type", content = "value")]
 pub enum ApiErrorResponse {
     Unauthorized(ApiError),
     ForbiddenCommonResource(ApiError),
@@ -78,10 +92,11 @@ pub enum ApiErrorResponse {
     Unprocessable(ApiError),
     InternalServerError(ApiError),
     NotImplemented(ApiError),
-    ConnectorError(ApiError, StatusCode),
+    ConnectorError(ApiError, #[serde(skip_serializing)] StatusCode),
     NotFound(ApiError),
     MethodNotAllowed(ApiError),
     BadRequest(ApiError),
+    DomainError(ApiError),
 }
 
 impl ::core::fmt::Display for ApiErrorResponse {
@@ -110,6 +125,25 @@ impl ApiErrorResponse {
             | Self::NotFound(i)
             | Self::MethodNotAllowed(i)
             | Self::BadRequest(i)
+            | Self::DomainError(i)
+            | Self::ConnectorError(i, _) => i,
+        }
+    }
+
+    pub fn get_internal_error_mut(&mut self) -> &mut ApiError {
+        match self {
+            Self::Unauthorized(i)
+            | Self::ForbiddenCommonResource(i)
+            | Self::ForbiddenPrivateResource(i)
+            | Self::Conflict(i)
+            | Self::Gone(i)
+            | Self::Unprocessable(i)
+            | Self::InternalServerError(i)
+            | Self::NotImplemented(i)
+            | Self::NotFound(i)
+            | Self::MethodNotAllowed(i)
+            | Self::BadRequest(i)
+            | Self::DomainError(i)
             | Self::ConnectorError(i, _) => i,
         }
     }
@@ -127,6 +161,7 @@ impl ApiErrorResponse {
             | Self::NotFound(_)
             | Self::BadRequest(_) => "invalid_request",
             Self::InternalServerError(_) => "api",
+            Self::DomainError(_) => "blocked",
             Self::ConnectorError(_, _) => "connector",
         }
     }

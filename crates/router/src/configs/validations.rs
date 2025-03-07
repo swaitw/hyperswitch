@@ -1,6 +1,6 @@
 use common_utils::ext_traits::ConfigExt;
-
-use crate::core::errors::ApplicationError;
+use masking::PeekInterface;
+use storage_impl::errors::ApplicationError;
 
 impl super::settings::Secrets {
     pub fn validate(&self) -> Result<(), ApplicationError> {
@@ -15,6 +15,12 @@ impl super::settings::Secrets {
         when(self.admin_api_key.is_default_or_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
                 "admin API key must not be empty".into(),
+            ))
+        })?;
+
+        when(self.master_enc_key.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "Master encryption key must not be empty".into(),
             ))
         })
     }
@@ -43,9 +49,17 @@ impl super::settings::Locker {
 
 impl super::settings::Server {
     pub fn validate(&self) -> Result<(), ApplicationError> {
-        common_utils::fp_utils::when(self.host.is_default_or_empty(), || {
+        use common_utils::fp_utils::when;
+
+        when(self.host.is_default_or_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
                 "server host must not be empty".into(),
+            ))
+        })?;
+
+        when(self.workers == 0, || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "number of workers must be greater than 0".into(),
             ))
         })
     }
@@ -61,6 +75,12 @@ impl super::settings::Database {
             ))
         })?;
 
+        when(self.dbname.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "database name must not be empty".into(),
+            ))
+        })?;
+
         when(self.username.is_default_or_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
                 "database user username must not be empty".into(),
@@ -70,12 +90,6 @@ impl super::settings::Database {
         when(self.password.is_default_or_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
                 "database user password must not be empty".into(),
-            ))
-        })?;
-
-        when(self.dbname.is_default_or_empty(), || {
-            Err(ApplicationError::InvalidConfigurationValueError(
-                "database name must not be empty".into(),
             ))
         })
     }
@@ -91,64 +105,17 @@ impl super::settings::SupportedConnectors {
     }
 }
 
-impl super::settings::Connectors {
+impl super::settings::CorsSettings {
     pub fn validate(&self) -> Result<(), ApplicationError> {
-        self.aci.validate()?;
-        self.adyen.validate()?;
-        self.applepay.validate()?;
-        self.authorizedotnet.validate()?;
-        self.braintree.validate()?;
-        self.checkout.validate()?;
-        self.cybersource.validate()?;
-        self.globalpay.validate()?;
-        self.klarna.validate()?;
-        self.shift4.validate()?;
-        self.stripe.validate()?;
-        self.worldpay.validate()?;
-
-        self.supported.validate()?;
-
-        Ok(())
-    }
-}
-
-impl super::settings::ConnectorParams {
-    pub fn validate(&self) -> Result<(), ApplicationError> {
-        common_utils::fp_utils::when(self.base_url.is_default_or_empty(), || {
+        common_utils::fp_utils::when(self.wildcard_origin && !self.origins.is_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
-                "connector base URL must not be empty".into(),
-            ))
-        })
-    }
-}
-
-impl super::settings::SchedulerSettings {
-    pub fn validate(&self) -> Result<(), ApplicationError> {
-        use common_utils::fp_utils::when;
-
-        when(self.stream.is_default_or_empty(), || {
-            Err(ApplicationError::InvalidConfigurationValueError(
-                "scheduler stream must not be empty".into(),
+                "Allowed Origins must be empty when wildcard origin is true".to_string(),
             ))
         })?;
 
-        when(self.consumer.consumer_group.is_default_or_empty(), || {
+        common_utils::fp_utils::when(!self.wildcard_origin && self.origins.is_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
-                "scheduler consumer group must not be empty".into(),
-            ))
-        })?;
-
-        self.producer.validate()?;
-
-        Ok(())
-    }
-}
-
-impl super::settings::ProducerSettings {
-    pub fn validate(&self) -> Result<(), ApplicationError> {
-        common_utils::fp_utils::when(self.lock_key.is_default_or_empty(), || {
-            Err(ApplicationError::InvalidConfigurationValueError(
-                "producer lock key must not be empty".into(),
+                "Allowed origins must not be empty. Please either enable wildcard origin or provide Allowed Origin".to_string(),
             ))
         })
     }
@@ -169,36 +136,159 @@ impl super::settings::ApiKeys {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         use common_utils::fp_utils::when;
 
-        #[cfg(feature = "kms")]
-        return when(self.kms_encrypted_hash_key.is_default_or_empty(), || {
-            Err(ApplicationError::InvalidConfigurationValueError(
-                "API key hashing key must not be empty when KMS feature is enabled".into(),
-            ))
-        });
-
-        #[cfg(not(feature = "kms"))]
-        when(self.hash_key.is_empty(), || {
+        when(self.hash_key.peek().is_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
                 "API key hashing key must not be empty".into(),
+            ))
+        })?;
+
+        #[cfg(feature = "email")]
+        when(self.expiry_reminder_days.is_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "API key expiry reminder days must not be empty".into(),
+            ))
+        })?;
+
+        Ok(())
+    }
+}
+
+impl super::settings::LockSettings {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        use common_utils::fp_utils::when;
+
+        when(self.redis_lock_expiry_seconds.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "redis_lock_expiry_seconds must not be empty or 0".into(),
+            ))
+        })?;
+
+        when(
+            self.delay_between_retries_in_milliseconds
+                .is_default_or_empty(),
+            || {
+                Err(ApplicationError::InvalidConfigurationValueError(
+                    "delay_between_retries_in_milliseconds must not be empty or 0".into(),
+                ))
+            },
+        )?;
+
+        when(self.lock_retries.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "lock_retries must not be empty or 0".into(),
             ))
         })
     }
 }
 
-#[cfg(feature = "kms")]
-impl super::settings::Kms {
+impl super::settings::GenericLinkEnvConfig {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         use common_utils::fp_utils::when;
 
-        when(self.key_id.is_default_or_empty(), || {
+        when(self.expiry == 0, || {
             Err(ApplicationError::InvalidConfigurationValueError(
-                "KMS AWS key ID must not be empty".into(),
+                "link's expiry should not be 0".into(),
+            ))
+        })
+    }
+}
+
+#[cfg(feature = "v2")]
+impl super::settings::CellInformation {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        use common_utils::{fp_utils::when, id_type};
+
+        when(self == &Self::default(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "CellId cannot be set to a default".into(),
+            ))
+        })
+    }
+}
+
+impl super::settings::NetworkTokenizationService {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        use common_utils::fp_utils::when;
+
+        when(self.token_service_api_key.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "token_service_api_key must not be empty".into(),
             ))
         })?;
 
-        when(self.region.is_default_or_empty(), || {
+        when(self.public_key.is_default_or_empty(), || {
             Err(ApplicationError::InvalidConfigurationValueError(
-                "KMS AWS region must not be empty".into(),
+                "public_key must not be empty".into(),
+            ))
+        })?;
+
+        when(self.key_id.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "key_id must not be empty".into(),
+            ))
+        })?;
+
+        when(self.private_key.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "private_key must not be empty".into(),
+            ))
+        })
+    }
+}
+
+impl super::settings::PazeDecryptConfig {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        use common_utils::fp_utils::when;
+
+        when(self.paze_private_key.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "paze_private_key must not be empty".into(),
+            ))
+        })?;
+
+        when(
+            self.paze_private_key_passphrase.is_default_or_empty(),
+            || {
+                Err(ApplicationError::InvalidConfigurationValueError(
+                    "paze_private_key_passphrase must not be empty".into(),
+                ))
+            },
+        )
+    }
+}
+
+impl super::settings::GooglePayDecryptConfig {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        use common_utils::fp_utils::when;
+
+        when(
+            self.google_pay_root_signing_keys.is_default_or_empty(),
+            || {
+                Err(ApplicationError::InvalidConfigurationValueError(
+                    "google_pay_root_signing_keys must not be empty".into(),
+                ))
+            },
+        )
+    }
+}
+
+impl super::settings::KeyManagerConfig {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        use common_utils::fp_utils::when;
+
+        #[cfg(feature = "keymanager_mtls")]
+        when(
+            self.enabled && (self.ca.is_default_or_empty() || self.cert.is_default_or_empty()),
+            || {
+                Err(ApplicationError::InvalidConfigurationValueError(
+                    "Invalid CA or Certificate for Keymanager.".into(),
+                ))
+            },
+        )?;
+
+        when(self.enabled && self.url.is_default_or_empty(), || {
+            Err(ApplicationError::InvalidConfigurationValueError(
+                "Invalid URL for Keymanager".into(),
             ))
         })
     }

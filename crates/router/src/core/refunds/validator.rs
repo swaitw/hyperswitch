@@ -1,20 +1,27 @@
-use error_stack::{report, IntoReport};
+use error_stack::report;
 use router_env::{instrument, tracing};
 use time::PrimitiveDateTime;
 
 use crate::{
     core::errors::{self, CustomResult, RouterResult},
-    db::StorageInterface,
-    logger,
-    types::storage::{self, enums},
+    types::{
+        self,
+        api::enums as api_enums,
+        storage::{self, enums},
+    },
     utils::{self, OptionExt},
 };
+
+// Limit constraints for refunds list flow
+pub const LOWER_LIMIT: i64 = 1;
+pub const UPPER_LIMIT: i64 = 100;
+pub const DEFAULT_LIMIT: i64 = 10;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RefundValidationError {
     #[error("The payment attempt was not successful")]
     UnsuccessfulPaymentAttempt,
-    #[error("The refund amount exceeds the payment amount")]
+    #[error("The refund amount exceeds the amount captured")]
     RefundAmountExceedsPaymentAmount,
     #[error("The order has expired")]
     OrderExpired,
@@ -37,7 +44,7 @@ pub fn validate_success_transaction(
 
 #[instrument(skip_all)]
 pub fn validate_refund_amount(
-    payment_attempt_amount: i64, // &storage::PaymentAttempt,
+    amount_captured: i64,
     all_refunds: &[storage::Refund],
     refund_amount: i64,
 ) -> CustomResult<(), RefundValidationError> {
@@ -47,7 +54,7 @@ pub fn validate_refund_amount(
             if refund.refund_status != enums::RefundStatus::Failure
                 && refund.refund_status != enums::RefundStatus::TransactionFailure
             {
-                Some(refund.refund_amount)
+                Some(refund.refund_amount.get_amount_as_i64())
             } else {
                 None
             }
@@ -55,7 +62,7 @@ pub fn validate_refund_amount(
         .sum();
 
     utils::when(
-        refund_amount > (payment_attempt_amount - total_refunded_amount),
+        refund_amount > (amount_captured - total_refunded_amount),
         || {
             Err(report!(
                 RefundValidationError::RefundAmountExceedsPaymentAmount
@@ -87,45 +94,10 @@ pub fn validate_maximum_refund_against_payment_attempt(
     })
 }
 
-#[instrument(skip(db))]
-pub async fn validate_uniqueness_of_refund_id_against_merchant_id(
-    db: &dyn StorageInterface,
-    payment_id: &str,
-    merchant_id: &str,
-    refund_id: &str,
-    storage_scheme: enums::MerchantStorageScheme,
-) -> RouterResult<Option<storage::Refund>> {
-    let refund = db
-        .find_refund_by_merchant_id_refund_id(merchant_id, refund_id, storage_scheme)
-        .await;
-    logger::debug!(?refund);
-    match refund {
-        Err(err) => {
-            if err.current_context().is_db_not_found() {
-                // Empty vec should be returned by query in case of no results, this check exists just
-                // to be on the safer side. Fixed this, now vector is not returned but should check the flow in detail later.
-                Ok(None)
-            } else {
-                Err(err
-                    .change_context(errors::ApiErrorResponse::InternalServerError)
-                    .attach_printable("Failed while finding refund, database error"))
-            }
-        }
-
-        Ok(refund) => {
-            if refund.payment_id == payment_id {
-                Ok(Some(refund))
-            } else {
-                Ok(None)
-            }
-        }
-    }
-}
-
 pub fn validate_refund_list(limit: Option<i64>) -> CustomResult<i64, errors::ApiErrorResponse> {
     match limit {
         Some(limit_val) => {
-            if !(1..=100).contains(&limit_val) {
+            if !(LOWER_LIMIT..=UPPER_LIMIT).contains(&limit_val) {
                 Err(errors::ApiErrorResponse::InvalidRequestData {
                     message: "limit should be in between 1 and 100".to_string(),
                 }
@@ -134,12 +106,12 @@ pub fn validate_refund_list(limit: Option<i64>) -> CustomResult<i64, errors::Api
                 Ok(limit_val)
             }
         }
-        None => Ok(10),
+        None => Ok(DEFAULT_LIMIT),
     }
 }
 
 pub fn validate_for_valid_refunds(
-    payment_attempt: &storage_models::payment_attempt::PaymentAttempt,
+    payment_attempt: &hyperswitch_domain_models::payments::payment_attempt::PaymentAttempt,
     connector: api_models::enums::Connector,
 ) -> RouterResult<()> {
     let payment_method = payment_attempt
@@ -148,11 +120,10 @@ pub fn validate_for_valid_refunds(
         .get_required_value("payment_method")?;
 
     match payment_method {
-        storage_models::enums::PaymentMethod::PayLater
-        | storage_models::enums::PaymentMethod::Wallet => {
+        diesel_models::enums::PaymentMethod::PayLater
+        | diesel_models::enums::PaymentMethod::Wallet => {
             let payment_method_type = payment_attempt
                 .payment_method_type
-                .clone()
                 .get_required_value("payment_method_type")?;
 
             utils::when(
@@ -160,20 +131,153 @@ pub fn validate_for_valid_refunds(
                     (connector, payment_method_type),
                     (
                         api_models::enums::Connector::Braintree,
-                        storage_models::enums::PaymentMethodType::Paypal,
-                    ) | (
-                        api_models::enums::Connector::Klarna,
-                        storage_models::enums::PaymentMethodType::Klarna
+                        diesel_models::enums::PaymentMethodType::Paypal,
                     )
                 ),
                 || {
                     Err(errors::ApiErrorResponse::RefundNotPossible {
                         connector: connector.to_string(),
-                    })
+                    }
+                    .into())
                 },
             )
-            .into_report()
         }
         _ => Ok(()),
+    }
+}
+
+pub fn validate_stripe_charge_refund(
+    charge_type_option: Option<api_enums::PaymentChargeType>,
+    split_refund_request: &Option<common_types::refunds::SplitRefund>,
+) -> RouterResult<types::ChargeRefundsOptions> {
+    let charge_type = charge_type_option.ok_or_else(|| {
+        report!(errors::ApiErrorResponse::InternalServerError)
+            .attach_printable("Missing `charge_type` in PaymentAttempt.")
+    })?;
+
+    let refund_request = match split_refund_request {
+        Some(common_types::refunds::SplitRefund::StripeSplitRefund(stripe_split_refund)) => {
+            stripe_split_refund
+        }
+        _ => Err(errors::ApiErrorResponse::MissingRequiredField {
+            field_name: "stripe_split_refund",
+        })?,
+    };
+
+    let options = match charge_type {
+        api_enums::PaymentChargeType::Stripe(api_enums::StripeChargeType::Direct) => {
+            types::ChargeRefundsOptions::Direct(types::DirectChargeRefund {
+                revert_platform_fee: refund_request
+                    .revert_platform_fee
+                    .get_required_value("revert_platform_fee")?,
+            })
+        }
+        api_enums::PaymentChargeType::Stripe(api_enums::StripeChargeType::Destination) => {
+            types::ChargeRefundsOptions::Destination(types::DestinationChargeRefund {
+                revert_platform_fee: refund_request
+                    .revert_platform_fee
+                    .get_required_value("revert_platform_fee")?,
+                revert_transfer: refund_request
+                    .revert_transfer
+                    .get_required_value("revert_transfer")?,
+            })
+        }
+    };
+
+    Ok(options)
+}
+
+pub fn validate_adyen_charge_refund(
+    adyen_split_payment_response: &common_types::domain::AdyenSplitData,
+    adyen_split_refund_request: &common_types::domain::AdyenSplitData,
+) -> RouterResult<()> {
+    if adyen_split_refund_request.store != adyen_split_payment_response.store {
+        return Err(report!(errors::ApiErrorResponse::InvalidDataValue {
+            field_name: "split_payments.adyen_split_payment.store",
+        }));
+    };
+
+    for refund_split_item in adyen_split_refund_request.split_items.iter() {
+        let refund_split_reference = refund_split_item.reference.clone();
+        let matching_payment_split_item = adyen_split_payment_response
+            .split_items
+            .iter()
+            .find(|payment_split_item| refund_split_reference == payment_split_item.reference);
+
+        if let Some(payment_split_item) = matching_payment_split_item {
+            if let Some((refund_amount, payment_amount)) =
+                refund_split_item.amount.zip(payment_split_item.amount)
+            {
+                if refund_amount > payment_amount {
+                    return Err(report!(errors::ApiErrorResponse::InvalidRequestData {
+                        message: format!(
+                            "Invalid refund amount for split item, reference: {}",
+                            refund_split_reference
+                        ),
+                    }));
+                }
+            }
+
+            if let Some((refund_account, payment_account)) = refund_split_item
+                .account
+                .as_ref()
+                .zip(payment_split_item.account.as_ref())
+            {
+                if !refund_account.eq(payment_account) {
+                    return Err(report!(errors::ApiErrorResponse::InvalidRequestData {
+                        message: format!(
+                            "Invalid refund account for split item, reference: {}",
+                            refund_split_reference
+                        ),
+                    }));
+                }
+            }
+
+            if refund_split_item.split_type != payment_split_item.split_type {
+                return Err(report!(errors::ApiErrorResponse::InvalidRequestData {
+                    message: format!(
+                        "Invalid refund split_type for split item, reference: {}",
+                        refund_split_reference
+                    ),
+                }));
+            }
+        } else {
+            return Err(report!(errors::ApiErrorResponse::InvalidRequestData {
+                message: format!(
+                    "No matching payment split item found for reference: {}",
+                    refund_split_reference
+                ),
+            }));
+        }
+    }
+    Ok(())
+}
+pub fn validate_xendit_charge_refund(
+    xendit_split_payment_response: &common_types::payments::XenditChargeResponseData,
+    xendit_split_refund_request: &common_types::domain::XenditSplitSubMerchantData,
+) -> RouterResult<Option<String>> {
+    match xendit_split_payment_response {
+        common_types::payments::XenditChargeResponseData::MultipleSplits(
+            payment_sub_merchant_data,
+        ) => {
+            if payment_sub_merchant_data.for_user_id
+                != Some(xendit_split_refund_request.for_user_id.clone())
+            {
+                return Err(errors::ApiErrorResponse::InvalidDataValue {
+                    field_name: "xendit_split_refund.for_user_id does not match xendit_split_payment.for_user_id",
+                }.into());
+            }
+            Ok(Some(xendit_split_refund_request.for_user_id.clone()))
+        }
+        common_types::payments::XenditChargeResponseData::SingleSplit(
+            payment_sub_merchant_data,
+        ) => {
+            if payment_sub_merchant_data.for_user_id != xendit_split_refund_request.for_user_id {
+                return Err(errors::ApiErrorResponse::InvalidDataValue {
+                    field_name: "xendit_split_refund.for_user_id does not match xendit_split_payment.for_user_id",
+                }.into());
+            }
+            Ok(Some(xendit_split_refund_request.for_user_id.clone()))
+        }
     }
 }

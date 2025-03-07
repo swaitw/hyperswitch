@@ -1,6 +1,10 @@
-use api_models::payments::Address;
+#![allow(clippy::print_stdout)]
+
+use std::str::FromStr;
+
+use hyperswitch_domain_models::address::{Address, AddressDetails};
 use masking::Secret;
-use router::types::{self, api, storage::enums, PaymentAddress};
+use router::types::{self, api, domain, storage::enums, PaymentAddress};
 
 use crate::{
     connector_auth,
@@ -11,20 +15,22 @@ use crate::{
 struct DlocalTest;
 impl ConnectorActions for DlocalTest {}
 impl utils::Connector for DlocalTest {
-    fn get_data(&self) -> types::api::ConnectorData {
+    fn get_data(&self) -> api::ConnectorData {
         use router::connector::Dlocal;
-        types::api::ConnectorData {
-            connector: Box::new(&Dlocal),
-            connector_name: types::Connector::Dlocal,
-            get_token: types::api::GetToken::Connector,
-        }
+        utils::construct_connector_data_old(
+            Box::new(&Dlocal),
+            types::Connector::Dlocal,
+            api::GetToken::Connector,
+            None,
+        )
     }
 
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .dlocal
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration")
+                .into(),
         )
     }
 
@@ -63,7 +69,7 @@ async fn should_partially_capture_authorized_payment() {
         .authorize_and_capture_payment(
             None,
             Some(types::PaymentsCaptureData {
-                amount_to_capture: Some(50),
+                amount_to_capture: 50,
                 ..utils::PaymentCaptureType::default().0
             }),
             Some(get_payment_info()),
@@ -85,7 +91,7 @@ async fn should_sync_authorized_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Authorized,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 ..Default::default()
@@ -196,7 +202,7 @@ async fn should_sync_auto_captured_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Charged,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 ..Default::default()
@@ -278,36 +284,15 @@ async fn should_sync_refund() {
     );
 }
 
-// Cards Negative scenerios
+// Cards Negative scenarios
 // Creates a payment with incorrect card number.
 #[actix_web::test]
 async fn should_fail_payment_for_incorrect_card_number() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new("1891011".to_string()),
-                    ..utils::CCardType::default().0
-                }),
-                ..utils::PaymentAuthorizeType::default().0
-            }),
-            Some(get_payment_info()),
-        )
-        .await
-        .unwrap();
-    let x = response.response.unwrap_err();
-    assert_eq!(x.message, "Invalid parameter",);
-    assert_eq!(x.reason, Some("card.number".to_string()));
-}
-
-// Creates a payment with empty card number.
-#[actix_web::test]
-async fn should_fail_payment_for_empty_card_number() {
-    let response = CONNECTOR
-        .make_payment(
-            Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new(String::from("")),
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
+                    card_number: cards::CardNumber::from_str("1891011").unwrap(),
                     ..utils::CCardType::default().0
                 }),
                 ..utils::PaymentAuthorizeType::default().0
@@ -327,7 +312,7 @@ async fn should_fail_payment_for_incorrect_cvc() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_cvc: Secret::new("1ad2345".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -348,7 +333,7 @@ async fn should_fail_payment_for_invalid_exp_month() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_month: Secret::new("201".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -369,7 +354,7 @@ async fn should_fail_payment_for_incorrect_expiry_year() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_year: Secret::new("20001".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -437,13 +422,13 @@ async fn should_fail_for_refund_amount_higher_than_payment_amount() {
 
 pub fn get_payment_info() -> PaymentInfo {
     PaymentInfo {
-        address: Some(PaymentAddress {
-            shipping: None,
-            billing: Some(Address {
+        address: Some(PaymentAddress::new(
+            None,
+            Some(Address {
                 phone: None,
-                address: Some(api::AddressDetails {
+                address: Some(AddressDetails {
                     city: None,
-                    country: Some("PA".to_string()),
+                    country: Some(api_models::enums::CountryAlpha2::PA),
                     line1: None,
                     line2: None,
                     line3: None,
@@ -452,12 +437,15 @@ pub fn get_payment_info() -> PaymentInfo {
                     first_name: None,
                     last_name: None,
                 }),
+                email: None,
             }),
-        }),
+            None,
+            None,
+        )),
         auth_type: None,
         access_token: None,
-        router_return_url: None,
         connector_meta_data: None,
+        ..Default::default()
     }
 }
 // Connector dependent test cases goes here

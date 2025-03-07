@@ -1,13 +1,13 @@
-//!
 //! Errors specific to this custom redis interface
-//!
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 pub enum RedisError {
     #[error("Invalid Redis configuration: {0}")]
     InvalidConfiguration(String),
     #[error("Failed to set key value in Redis")]
     SetFailed,
+    #[error("Failed to set key value in Redis. Duplicate value")]
+    SetNxFailed,
     #[error("Failed to set key value with expiry in Redis")]
     SetExFailed,
     #[error("Failed to set expiry for key value in Redis")]
@@ -28,6 +28,8 @@ pub enum RedisError {
     StreamTrimFailed,
     #[error("Failed to acknowledge Redis stream entry")]
     StreamAcknowledgeFailed,
+    #[error("Stream is either empty or not available")]
+    StreamEmptyOrNotAvailable,
     #[error("Failed to create Redis consumer group")]
     ConsumerGroupCreateFailed,
     #[error("Failed to destroy Redis consumer group")]
@@ -46,6 +48,8 @@ pub enum RedisError {
     SetHashFailed,
     #[error("Failed to set hash field in Redis")]
     SetHashFieldFailed,
+    #[error("Failed to add members to set in Redis")]
+    SetAddMembersFailed,
     #[error("Failed to get hash field in Redis")]
     GetHashFieldFailed,
     #[error("The requested value was not found in Redis")]
@@ -58,4 +62,18 @@ pub enum RedisError {
     SubscribeError,
     #[error("Failed to publish to a channel")]
     PublishError,
+    #[error("Failed while receiving message from publisher")]
+    OnMessageError,
+    #[error("Got an unknown result from redis")]
+    UnknownResult,
+    #[error("Failed to append elements to list in Redis")]
+    AppendElementsToListFailed,
+    #[error("Failed to get list elements in Redis")]
+    GetListElementsFailed,
+    #[error("Failed to get length of list")]
+    GetListLengthFailed,
+    #[error("Failed to pop list elements in Redis")]
+    PopListElementsFailed,
+    #[error("Failed to increment hash field in Redis")]
+    IncrementHashFieldFailed,
 }

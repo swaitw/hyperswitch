@@ -1,5 +1,7 @@
-#![allow(unused_variables)]
-use crate::core::errors;
+use common_utils::errors::ErrorSwitch;
+use hyperswitch_domain_models::errors::api_error_response as errors;
+
+use crate::core::errors::CustomersErrorResponse;
 
 #[derive(Debug, router_derive::ApiError, Clone)]
 #[error(error_type_enum = StripeErrorType)]
@@ -20,10 +22,7 @@ pub enum StripeErrorCode {
     InvalidRequestUrl,
 
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "parameter_missing", message = "Missing required param: {field_name}.")]
-    ParameterMissing {
-        field_name: &'static str,
-        param: &'static str,
-    },
+    ParameterMissing { field_name: String, param: String },
 
     #[error(
         error_type = StripeErrorType::InvalidRequestError, code = "parameter_unknown",
@@ -34,7 +33,7 @@ pub enum StripeErrorCode {
         expected_format: String,
     },
 
-    #[error(error_type = StripeErrorType::InvalidRequestError, code = "IR_06",  message = "Refund amount exceeds the payment amount.")]
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "IR_06",  message = "The refund amount exceeds the amount captured.")]
     RefundAmountExceedsPaymentAmount { param: String },
 
     #[error(error_type = StripeErrorType::ApiError, code = "payment_intent_authentication_failure", message = "Payment failed while processing with connector. Retry payment.")]
@@ -43,14 +42,26 @@ pub enum StripeErrorCode {
     #[error(error_type = StripeErrorType::ApiError, code = "payment_intent_payment_attempt_failed", message = "Capture attempt failed while processing with connector.")]
     PaymentIntentPaymentAttemptFailed { data: Option<serde_json::Value> },
 
+    #[error(error_type = StripeErrorType::ApiError, code = "dispute_failure", message = "Dispute failed while processing with connector. Retry operation.")]
+    DisputeFailed { data: Option<serde_json::Value> },
+
     #[error(error_type = StripeErrorType::CardError, code = "expired_card", message = "Card Expired. Please use another card")]
     ExpiredCard,
 
     #[error(error_type = StripeErrorType::CardError, code = "invalid_card_type", message = "Card data is invalid")]
     InvalidCardType,
 
+    #[error(
+        error_type = StripeErrorType::ConnectorError, code = "invalid_wallet_token",
+        message = "Invalid {wallet_name} wallet token"
+    )]
+    InvalidWalletToken { wallet_name: String },
+
     #[error(error_type = StripeErrorType::ApiError, code = "refund_failed", message = "refund has failed")]
     RefundFailed, // stripe error code
+
+    #[error(error_type = StripeErrorType::ApiError, code = "payout_failed", message = "payout has failed")]
+    PayoutFailed,
 
     #[error(error_type = StripeErrorType::ApiError, code = "internal_server_error", message = "Server is down")]
     InternalServerError,
@@ -64,6 +75,9 @@ pub enum StripeErrorCode {
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "customer_redacted", message = "Customer has redacted")]
     CustomerRedacted,
 
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "customer_already_exists", message = "Customer with the given customer_id already exists")]
+    DuplicateCustomer,
+
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such refund")]
     RefundNotFound,
 
@@ -76,11 +90,20 @@ pub enum StripeErrorCode {
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such config")]
     ConfigNotFound,
 
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "duplicate_resource", message = "Duplicate config")]
+    DuplicateConfig,
+
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such payment")]
     PaymentNotFound,
 
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such payment method")]
     PaymentMethodNotFound,
+
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "{message}")]
+    GenericNotFoundError { message: String },
+
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "duplicate_resource", message = "{message}")]
+    GenericDuplicateError { message: String },
 
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such merchant account")]
     MerchantAccountNotFound,
@@ -88,8 +111,11 @@ pub enum StripeErrorCode {
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such resource ID")]
     ResourceIdNotFound,
 
-    #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such merchant connector account")]
-    MerchantConnectorAccountNotFound,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "Merchant connector account does not exist in our records")]
+    MerchantConnectorAccountNotFound { id: String },
+
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "invalid_request", message = "The merchant connector account is disabled")]
+    MerchantConnectorAccountDisabled,
 
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such mandate")]
     MandateNotFound,
@@ -97,14 +123,26 @@ pub enum StripeErrorCode {
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such API key")]
     ApiKeyNotFound,
 
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such payout")]
+    PayoutNotFound,
+
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "resource_missing", message = "No such event")]
+    EventNotFound,
+
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "token_already_used", message = "Duplicate payout request")]
+    DuplicatePayout { payout_id: String },
+
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "parameter_missing", message = "Return url is not available")]
     ReturnUrlUnavailable,
 
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "token_already_used", message = "duplicate merchant account")]
     DuplicateMerchantAccount,
 
-    #[error(error_type = StripeErrorType::InvalidRequestError, code = "token_already_used", message = "duplicate merchant_connector_account")]
-    DuplicateMerchantConnectorAccount,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "token_already_used", message = "The merchant connector account with the specified profile_id '{profile_id}' and connector_label '{connector_label}' already exists in our records")]
+    DuplicateMerchantConnectorAccount {
+        profile_id: String,
+        connector_label: String,
+    },
 
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "token_already_used", message = "duplicate payment method")]
     DuplicatePaymentMethod,
@@ -167,8 +205,10 @@ pub enum StripeErrorCode {
     #[error(error_type = StripeErrorType::InvalidRequestError, code = "", message = "The mandate information is invalid. {message}")]
     PaymentIntentMandateInvalid { message: String },
 
-    #[error(error_type = StripeErrorType::InvalidRequestError, code = "", message = "The payment with the specified payment_id '{payment_id}' already exists in our records.")]
-    DuplicatePayment { payment_id: String },
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "", message = "The payment with the specified payment_id already exists in our records.")]
+    DuplicatePayment {
+        payment_id: common_utils::id_type::PaymentId,
+    },
 
     #[error(error_type = StripeErrorType::ConnectorError, code = "", message = "{code}: {message}")]
     ExternalConnectorError {
@@ -178,8 +218,70 @@ pub enum StripeErrorCode {
         status_code: u16,
     },
 
+    #[error(error_type = StripeErrorType::CardError, code = "", message = "{code}: {message}")]
+    PaymentBlockedError {
+        code: u16,
+        message: String,
+        status: String,
+        reason: String,
+    },
+
     #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "The connector provided in the request is incorrect or not available")]
     IncorrectConnectorNameGiven,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "No such {object}: '{id}'")]
+    ResourceMissing { object: String, id: String },
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "File validation failed")]
+    FileValidationFailed,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "File not found in the request")]
+    MissingFile,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "File puropse not found in the request")]
+    MissingFilePurpose,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "File content type not found")]
+    MissingFileContentType,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "Dispute id not found in the request")]
+    MissingDisputeId,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "File does not exists in our records")]
+    FileNotFound,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "File not available")]
+    FileNotAvailable,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "", message = "Not Supported because provider is not Router")]
+    FileProviderNotSupported,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "There was an issue with processing webhooks")]
+    WebhookProcessingError,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "payment_method_unactivated", message = "The operation cannot be performed as the payment method used has not been activated. Activate the payment method in the Dashboard, then try again.")]
+    PaymentMethodUnactivated,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "{message}")]
+    HyperswitchUnprocessableEntity { message: String },
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "", message = "{message}")]
+    CurrencyNotSupported { message: String },
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "Payment Link does not exist in our records")]
+    PaymentLinkNotFound,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "Resource Busy. Please try again later")]
+    LockTimeout,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "", message = "Merchant connector account is configured with invalid {config}")]
+    InvalidConnectorConfiguration { config: String },
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "HE_01", message = "Failed to convert currency to minor unit")]
+    CurrencyConversionFailed,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "IR_25", message = "Cannot delete the default payment method")]
+    PaymentMethodDeleteFailed,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "", message = "Extended card info does not exist")]
+    ExtendedCardInfoNotFound,
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "not_configured", message = "{message}")]
+    LinkConfigurationError { message: String },
+    #[error(error_type = StripeErrorType::ConnectorError, code = "CE", message = "{reason} as data mismatched for {field_names}")]
+    IntegrityCheckFailed {
+        reason: String,
+        field_names: String,
+        connector_transaction_id: Option<String>,
+    },
+    #[error(error_type = StripeErrorType::InvalidRequestError, code = "IR_28", message = "Invalid tenant")]
+    InvalidTenant,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "HE_01", message = "Failed to convert amount to {amount_type} type")]
+    AmountConversionFailed { amount_type: &'static str },
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "Platform Bad Request")]
+    PlatformBadRequest,
+    #[error(error_type = StripeErrorType::HyperswitchError, code = "", message = "Platform Unauthorized Request")]
+    PlatformUnauthorizedRequest,
     // [#216]: https://github.com/juspay/hyperswitch/issues/216
     // Implement the remaining stripe error codes
 
@@ -280,7 +382,6 @@ pub enum StripeErrorCode {
         PaymentMethodMicrodepositVerificationTimeout,
         PaymentMethodProviderDecline,
         PaymentMethodProviderTimeout,
-        PaymentMethodUnactivated,
         PaymentMethodUnexpectedState,
         PaymentMethodUnsupportedType,
         PayoutsNotAllowed,
@@ -345,14 +446,35 @@ impl From<errors::ApiErrorResponse> for StripeErrorCode {
             errors::ApiErrorResponse::Unauthorized
             | errors::ApiErrorResponse::InvalidJwtToken
             | errors::ApiErrorResponse::GenericUnauthorized { .. }
-            | errors::ApiErrorResponse::InvalidEphemeralKey => Self::Unauthorized,
+            | errors::ApiErrorResponse::AccessForbidden { .. }
+            | errors::ApiErrorResponse::InvalidCookie
+            | errors::ApiErrorResponse::InvalidEphemeralKey
+            | errors::ApiErrorResponse::CookieNotFound => Self::Unauthorized,
             errors::ApiErrorResponse::InvalidRequestUrl
-            | errors::ApiErrorResponse::InvalidHttpMethod => Self::InvalidRequestUrl,
+            | errors::ApiErrorResponse::InvalidHttpMethod
+            | errors::ApiErrorResponse::InvalidCardIin
+            | errors::ApiErrorResponse::InvalidCardIinLength => Self::InvalidRequestUrl,
             errors::ApiErrorResponse::MissingRequiredField { field_name } => {
                 Self::ParameterMissing {
-                    field_name,
-                    param: field_name,
+                    field_name: field_name.to_string(),
+                    param: field_name.to_string(),
                 }
+            }
+            errors::ApiErrorResponse::UnprocessableEntity { message } => {
+                Self::HyperswitchUnprocessableEntity { message }
+            }
+            errors::ApiErrorResponse::MissingRequiredFields { field_names } => {
+                // Instead of creating a new error variant in StripeErrorCode for MissingRequiredFields, converted vec<&str> to String
+                Self::ParameterMissing {
+                    field_name: field_names.clone().join(", "),
+                    param: field_names.clone().join(", "),
+                }
+            }
+            errors::ApiErrorResponse::GenericNotFoundError { message } => {
+                Self::GenericNotFoundError { message }
+            }
+            errors::ApiErrorResponse::GenericDuplicateError { message } => {
+                Self::GenericDuplicateError { message }
             }
             // parameter unknown, invalid request error // actually if we type wrong values in address we get this error. Stripe throws parameter unknown. I don't know if stripe is validating email and stuff
             errors::ApiErrorResponse::InvalidDataFormat {
@@ -377,12 +499,18 @@ impl From<errors::ApiErrorResponse> for StripeErrorCode {
             errors::ApiErrorResponse::PaymentCaptureFailed { data } => {
                 Self::PaymentIntentPaymentAttemptFailed { data }
             }
-            errors::ApiErrorResponse::InvalidCardData { data } => Self::InvalidCardType, // Maybe it is better to de generalize this router error
-            errors::ApiErrorResponse::CardExpired { data } => Self::ExpiredCard,
-            errors::ApiErrorResponse::RefundNotPossible { connector } => Self::RefundFailed,
-            errors::ApiErrorResponse::RefundFailed { data } => Self::RefundFailed, // Nothing at stripe to map
+            errors::ApiErrorResponse::DisputeFailed { data } => Self::DisputeFailed { data },
+            errors::ApiErrorResponse::InvalidCardData { data: _ } => Self::InvalidCardType, // Maybe it is better to de generalize this router error
+            errors::ApiErrorResponse::CardExpired { data: _ } => Self::ExpiredCard,
+            errors::ApiErrorResponse::RefundNotPossible { connector: _ } => Self::RefundFailed,
+            errors::ApiErrorResponse::RefundFailed { data: _ } => Self::RefundFailed, // Nothing at stripe to map
+            errors::ApiErrorResponse::PayoutFailed { data: _ } => Self::PayoutFailed,
 
-            errors::ApiErrorResponse::InternalServerError => Self::InternalServerError, // not a stripe code
+            errors::ApiErrorResponse::MandateUpdateFailed
+            | errors::ApiErrorResponse::MandateSerializationFailed
+            | errors::ApiErrorResponse::MandateDeserializationFailed
+            | errors::ApiErrorResponse::InternalServerError
+            | errors::ApiErrorResponse::HealthCheckError { .. } => Self::InternalServerError, // not a stripe code
             errors::ApiErrorResponse::ExternalConnectorError {
                 code,
                 message,
@@ -401,7 +529,11 @@ impl From<errors::ApiErrorResponse> for StripeErrorCode {
             errors::ApiErrorResponse::MandateActive => Self::MandateActive, //not a stripe code
             errors::ApiErrorResponse::CustomerRedacted => Self::CustomerRedacted, //not a stripe code
             errors::ApiErrorResponse::ConfigNotFound => Self::ConfigNotFound, // not a stripe code
+            errors::ApiErrorResponse::DuplicateConfig => Self::DuplicateConfig, // not a stripe code
             errors::ApiErrorResponse::DuplicateRefundRequest => Self::DuplicateRefundRequest,
+            errors::ApiErrorResponse::DuplicatePayout { payout_id } => {
+                Self::DuplicatePayout { payout_id }
+            }
             errors::ApiErrorResponse::RefundNotFound => Self::RefundNotFound,
             errors::ApiErrorResponse::CustomerNotFound => Self::CustomerNotFound,
             errors::ApiErrorResponse::PaymentNotFound => Self::PaymentNotFound,
@@ -409,21 +541,39 @@ impl From<errors::ApiErrorResponse> for StripeErrorCode {
             errors::ApiErrorResponse::ClientSecretNotGiven
             | errors::ApiErrorResponse::ClientSecretExpired => Self::ClientSecretNotFound,
             errors::ApiErrorResponse::MerchantAccountNotFound => Self::MerchantAccountNotFound,
+            errors::ApiErrorResponse::PaymentLinkNotFound => Self::PaymentLinkNotFound,
             errors::ApiErrorResponse::ResourceIdNotFound => Self::ResourceIdNotFound,
-            errors::ApiErrorResponse::MerchantConnectorAccountNotFound => {
-                Self::MerchantConnectorAccountNotFound
+            errors::ApiErrorResponse::MerchantConnectorAccountNotFound { id } => {
+                Self::MerchantConnectorAccountNotFound { id }
             }
             errors::ApiErrorResponse::MandateNotFound => Self::MandateNotFound,
             errors::ApiErrorResponse::ApiKeyNotFound => Self::ApiKeyNotFound,
+            errors::ApiErrorResponse::PayoutNotFound => Self::PayoutNotFound,
+            errors::ApiErrorResponse::EventNotFound => Self::EventNotFound,
             errors::ApiErrorResponse::MandateValidationFailed { reason } => {
                 Self::PaymentIntentMandateInvalid { message: reason }
             }
             errors::ApiErrorResponse::ReturnUrlUnavailable => Self::ReturnUrlUnavailable,
             errors::ApiErrorResponse::DuplicateMerchantAccount => Self::DuplicateMerchantAccount,
-            errors::ApiErrorResponse::DuplicateMerchantConnectorAccount => {
-                Self::DuplicateMerchantConnectorAccount
-            }
+            errors::ApiErrorResponse::DuplicateMerchantConnectorAccount {
+                profile_id,
+                connector_label,
+            } => Self::DuplicateMerchantConnectorAccount {
+                profile_id,
+                connector_label,
+            },
             errors::ApiErrorResponse::DuplicatePaymentMethod => Self::DuplicatePaymentMethod,
+            errors::ApiErrorResponse::PaymentBlockedError {
+                code,
+                message,
+                status,
+                reason,
+            } => Self::PaymentBlockedError {
+                code,
+                message,
+                status,
+                reason,
+            },
             errors::ApiErrorResponse::ClientSecretInvalid => Self::PaymentIntentInvalidParameter {
                 param: "client_secret".to_owned(),
             },
@@ -434,8 +584,8 @@ impl From<errors::ApiErrorResponse> for StripeErrorCode {
                 Self::PreconditionFailed { message }
             }
             errors::ApiErrorResponse::InvalidDataValue { field_name } => Self::ParameterMissing {
-                field_name,
-                param: field_name,
+                field_name: field_name.to_string(),
+                param: field_name.to_string(),
             },
             errors::ApiErrorResponse::MaximumRefundCount => Self::MaximumRefundCount,
             errors::ApiErrorResponse::PaymentNotSucceeded => Self::PaymentFailed,
@@ -458,7 +608,82 @@ impl From<errors::ApiErrorResponse> for StripeErrorCode {
             errors::ApiErrorResponse::DuplicatePayment { payment_id } => {
                 Self::DuplicatePayment { payment_id }
             }
+            errors::ApiErrorResponse::DisputeNotFound { dispute_id } => Self::ResourceMissing {
+                object: "dispute".to_owned(),
+                id: dispute_id,
+            },
+            errors::ApiErrorResponse::AuthenticationNotFound { id } => Self::ResourceMissing {
+                object: "authentication".to_owned(),
+                id,
+            },
+            errors::ApiErrorResponse::ProfileNotFound { id } => Self::ResourceMissing {
+                object: "business_profile".to_owned(),
+                id,
+            },
+            errors::ApiErrorResponse::PollNotFound { id } => Self::ResourceMissing {
+                object: "poll".to_owned(),
+                id,
+            },
+            errors::ApiErrorResponse::DisputeStatusValidationFailed { reason: _ } => {
+                Self::InternalServerError
+            }
+            errors::ApiErrorResponse::FileValidationFailed { .. } => Self::FileValidationFailed,
+            errors::ApiErrorResponse::MissingFile => Self::MissingFile,
+            errors::ApiErrorResponse::MissingFilePurpose => Self::MissingFilePurpose,
+            errors::ApiErrorResponse::MissingFileContentType => Self::MissingFileContentType,
+            errors::ApiErrorResponse::MissingDisputeId => Self::MissingDisputeId,
+            errors::ApiErrorResponse::FileNotFound => Self::FileNotFound,
+            errors::ApiErrorResponse::FileNotAvailable => Self::FileNotAvailable,
+            errors::ApiErrorResponse::MerchantConnectorAccountDisabled => {
+                Self::MerchantConnectorAccountDisabled
+            }
             errors::ApiErrorResponse::NotSupported { .. } => Self::InternalServerError,
+            errors::ApiErrorResponse::CurrencyNotSupported { message } => {
+                Self::CurrencyNotSupported { message }
+            }
+            errors::ApiErrorResponse::FileProviderNotSupported { .. } => {
+                Self::FileProviderNotSupported
+            }
+            errors::ApiErrorResponse::WebhookBadRequest
+            | errors::ApiErrorResponse::WebhookResourceNotFound
+            | errors::ApiErrorResponse::WebhookProcessingFailure
+            | errors::ApiErrorResponse::WebhookAuthenticationFailed
+            | errors::ApiErrorResponse::WebhookUnprocessableEntity
+            | errors::ApiErrorResponse::WebhookInvalidMerchantSecret => {
+                Self::WebhookProcessingError
+            }
+            errors::ApiErrorResponse::IncorrectPaymentMethodConfiguration => {
+                Self::PaymentMethodUnactivated
+            }
+            errors::ApiErrorResponse::ResourceBusy => Self::PaymentMethodUnactivated,
+            errors::ApiErrorResponse::InvalidConnectorConfiguration { config } => {
+                Self::InvalidConnectorConfiguration { config }
+            }
+            errors::ApiErrorResponse::CurrencyConversionFailed => Self::CurrencyConversionFailed,
+            errors::ApiErrorResponse::PaymentMethodDeleteFailed => Self::PaymentMethodDeleteFailed,
+            errors::ApiErrorResponse::InvalidWalletToken { wallet_name } => {
+                Self::InvalidWalletToken { wallet_name }
+            }
+            errors::ApiErrorResponse::ExtendedCardInfoNotFound => Self::ExtendedCardInfoNotFound,
+            errors::ApiErrorResponse::LinkConfigurationError { message } => {
+                Self::LinkConfigurationError { message }
+            }
+            errors::ApiErrorResponse::IntegrityCheckFailed {
+                reason,
+                field_names,
+                connector_transaction_id,
+            } => Self::IntegrityCheckFailed {
+                reason,
+                field_names,
+                connector_transaction_id,
+            },
+            errors::ApiErrorResponse::InvalidTenant { tenant_id: _ }
+            | errors::ApiErrorResponse::MissingTenantId => Self::InvalidTenant,
+            errors::ApiErrorResponse::AmountConversionFailed { amount_type } => {
+                Self::AmountConversionFailed { amount_type }
+            }
+            errors::ApiErrorResponse::PlatformAccountAuthNotSupported => Self::PlatformBadRequest,
+            errors::ApiErrorResponse::InvalidPlatformOperation => Self::PlatformUnauthorizedRequest,
         }
     }
 }
@@ -468,9 +693,11 @@ impl actix_web::ResponseError for StripeErrorCode {
         use reqwest::StatusCode;
 
         match self {
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::InvalidRequestUrl => StatusCode::NOT_FOUND,
-            Self::ParameterUnknown { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Unauthorized | Self::PlatformUnauthorizedRequest => StatusCode::UNAUTHORIZED,
+            Self::InvalidRequestUrl | Self::GenericNotFoundError { .. } => StatusCode::NOT_FOUND,
+            Self::ParameterUnknown { .. } | Self::HyperswitchUnprocessableEntity { .. } => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             Self::ParameterMissing { .. }
             | Self::RefundAmountExceedsPaymentAmount { .. }
             | Self::PaymentIntentAuthenticationFailure { .. }
@@ -478,25 +705,32 @@ impl actix_web::ResponseError for StripeErrorCode {
             | Self::ExpiredCard
             | Self::InvalidCardType
             | Self::DuplicateRefundRequest
+            | Self::DuplicatePayout { .. }
             | Self::RefundNotFound
             | Self::CustomerNotFound
             | Self::ConfigNotFound
+            | Self::DuplicateConfig
             | Self::ClientSecretNotFound
             | Self::PaymentNotFound
             | Self::PaymentMethodNotFound
             | Self::MerchantAccountNotFound
-            | Self::MerchantConnectorAccountNotFound
+            | Self::MerchantConnectorAccountNotFound { .. }
+            | Self::MerchantConnectorAccountDisabled
             | Self::MandateNotFound
             | Self::ApiKeyNotFound
+            | Self::PayoutNotFound
+            | Self::EventNotFound
             | Self::DuplicateMerchantAccount
-            | Self::DuplicateMerchantConnectorAccount
+            | Self::DuplicateMerchantConnectorAccount { .. }
             | Self::DuplicatePaymentMethod
             | Self::PaymentFailed
             | Self::VerificationFailed { .. }
+            | Self::DisputeFailed { .. }
             | Self::MaximumRefundCount
             | Self::PaymentIntentInvalidParameter { .. }
             | Self::SerdeQsError { .. }
             | Self::InvalidRequestData { .. }
+            | Self::InvalidWalletToken { .. }
             | Self::PreconditionFailed { .. }
             | Self::DuplicateMandate
             | Self::SuccessfulPaymentNotFound
@@ -505,27 +739,52 @@ impl actix_web::ResponseError for StripeErrorCode {
             | Self::PaymentIntentMandateInvalid { .. }
             | Self::PaymentIntentUnexpectedState { .. }
             | Self::DuplicatePayment { .. }
-            | Self::IncorrectConnectorNameGiven => StatusCode::BAD_REQUEST,
+            | Self::GenericDuplicateError { .. }
+            | Self::IncorrectConnectorNameGiven
+            | Self::ResourceMissing { .. }
+            | Self::FileValidationFailed
+            | Self::MissingFile
+            | Self::MissingFileContentType
+            | Self::MissingFilePurpose
+            | Self::MissingDisputeId
+            | Self::FileNotFound
+            | Self::FileNotAvailable
+            | Self::FileProviderNotSupported
+            | Self::CurrencyNotSupported { .. }
+            | Self::DuplicateCustomer
+            | Self::PaymentMethodUnactivated
+            | Self::InvalidConnectorConfiguration { .. }
+            | Self::CurrencyConversionFailed
+            | Self::PaymentMethodDeleteFailed
+            | Self::ExtendedCardInfoNotFound
+            | Self::PlatformBadRequest
+            | Self::LinkConfigurationError { .. } => StatusCode::BAD_REQUEST,
             Self::RefundFailed
+            | Self::PayoutFailed
+            | Self::PaymentLinkNotFound
             | Self::InternalServerError
             | Self::MandateActive
-            | Self::CustomerRedacted => StatusCode::INTERNAL_SERVER_ERROR,
+            | Self::CustomerRedacted
+            | Self::WebhookProcessingError
+            | Self::InvalidTenant
+            | Self::AmountConversionFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ReturnUrlUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ExternalConnectorError { status_code, .. } => {
                 StatusCode::from_u16(*status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
+            Self::IntegrityCheckFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::PaymentBlockedError { code, .. } => {
+                StatusCode::from_u16(*code).unwrap_or(StatusCode::OK)
+            }
+            Self::LockTimeout => StatusCode::LOCKED,
         }
     }
 
     fn error_response(&self) -> actix_web::HttpResponse {
         use actix_web::http::header;
 
-        use crate::consts;
-
         actix_web::HttpResponseBuilder::new(self.status_code())
             .insert_header((header::CONTENT_TYPE, mime::APPLICATION_JSON))
-            .insert_header((header::STRICT_TRANSPORT_SECURITY, consts::HSTS_HEADER_VALUE))
-            .insert_header((header::VIA, "Juspay_Router"))
             .body(self.to_string())
     }
 }
@@ -567,8 +826,23 @@ impl From<serde_qs::Error> for StripeErrorCode {
     }
 }
 
-impl common_utils::errors::ErrorSwitch<StripeErrorCode> for errors::ApiErrorResponse {
+impl ErrorSwitch<StripeErrorCode> for errors::ApiErrorResponse {
     fn switch(&self) -> StripeErrorCode {
         self.clone().into()
+    }
+}
+
+impl crate::services::EmbedError for error_stack::Report<StripeErrorCode> {}
+
+impl ErrorSwitch<StripeErrorCode> for CustomersErrorResponse {
+    fn switch(&self) -> StripeErrorCode {
+        use StripeErrorCode as SC;
+        match self {
+            Self::CustomerRedacted => SC::CustomerRedacted,
+            Self::InternalServerError => SC::InternalServerError,
+            Self::MandateActive => SC::MandateActive,
+            Self::CustomerNotFound => SC::CustomerNotFound,
+            Self::CustomerAlreadyExists => SC::DuplicateCustomer,
+        }
     }
 }

@@ -5,24 +5,27 @@ use crate::{
     utils::{self, ConnectorActions},
 };
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct MollieTest;
 impl ConnectorActions for MollieTest {}
 impl utils::Connector for MollieTest {
     fn get_data(&self) -> types::api::ConnectorData {
         use router::connector::Mollie;
-        types::api::ConnectorData {
-            connector: Box::new(&Mollie),
-            connector_name: types::Connector::Mollie,
-            get_token: types::api::GetToken::Connector,
-        }
+        utils::construct_connector_data_old(
+            Box::new(Mollie::new()),
+            types::Connector::Mollie,
+            types::api::GetToken::Connector,
+            None,
+        )
     }
 
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .mollie
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration")
+                .into(),
         )
     }
 

@@ -1,161 +1,378 @@
-//!
 //! Setup logging subsystem.
-//!
-use std::{path::PathBuf, time::Duration};
 
-use once_cell::sync::Lazy;
-use opentelemetry::{
-    global, runtime,
-    sdk::{
-        export::metrics::aggregation::cumulative_temporality_selector,
-        metrics::{controllers::BasicController, selectors::simple},
-        propagation::TraceContextPropagator,
-        trace, Resource,
-    },
-    KeyValue,
-};
-use opentelemetry_otlp::WithExportConfig;
+use std::time::Duration;
+
+use ::config::ConfigError;
+use serde_json::ser::{CompactFormatter, PrettyFormatter};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{filter, fmt, prelude::*, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{fmt, prelude::*, util::SubscriberInitExt, EnvFilter, Layer};
 
-use crate::{config, FormattingLayer, Level, StorageSubscription};
+use crate::{config, FormattingLayer, StorageSubscription};
 
-/// TelemetryGuard which helps with
+/// Contains guards necessary for logging and metrics collection.
 #[derive(Debug)]
 pub struct TelemetryGuard {
     _log_guards: Vec<WorkerGuard>,
-    _metric_controller: Option<BasicController>,
 }
 
-///
-/// Setup logging sub-system specifying.
-/// Expects config and list of names of crates to watch.
-///
-pub fn setup<Str: AsRef<str>>(
-    conf: &config::Log,
+/// Setup logging sub-system specifying the logging configuration, service (binary) name, and a
+/// list of external crates for which a more verbose logging must be enabled. All crates within the
+/// current cargo workspace are automatically considered for verbose logging.
+#[allow(clippy::print_stdout)] // The logger hasn't been initialized yet
+pub fn setup(
+    config: &config::Log,
     service_name: &str,
-    crates_to_watch: Vec<Str>,
-) -> Result<TelemetryGuard, opentelemetry::metrics::MetricsError> {
+    crates_to_filter: impl AsRef<[&'static str]>,
+) -> error_stack::Result<TelemetryGuard, ConfigError> {
     let mut guards = Vec::new();
 
-    global::set_text_map_propagator(TraceContextPropagator::new());
-
-    let telemetry = if conf.telemetry.enabled {
-        let trace_config = trace::config()
-            .with_sampler(trace::Sampler::TraceIdRatioBased(
-                conf.telemetry.sampling_rate.unwrap_or(1.0),
-            ))
-            .with_resource(Resource::new(vec![KeyValue::new("service.name", "router")]));
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_env())
-            .with_trace_config(trace_config)
-            .install_simple();
-
-        Some(tracer)
+    // Setup OpenTelemetry traces and metrics
+    let traces_layer = if config.telemetry.traces_enabled {
+        setup_tracing_pipeline(&config.telemetry, service_name)
     } else {
         None
     };
 
-    let file_writer = if conf.file.enabled {
-        let mut path: PathBuf = conf.file.path.clone().into();
-        path.push(crate::env::workspace_path());
-        path.push(&conf.file.path);
-        // println!("{:?} + {:?}", &path, &conf.file.file_name);
-        let file_appender = tracing_appender::rolling::hourly(&path, &conf.file.file_name);
+    if config.telemetry.metrics_enabled {
+        setup_metrics_pipeline(&config.telemetry)
+    };
+
+    // Setup file logging
+    let file_writer = if config.file.enabled {
+        let mut path = crate::env::workspace_path();
+        // Using an absolute path for file log path would replace workspace path with absolute path,
+        // which is the intended behavior for us.
+        path.push(&config.file.path);
+
+        let file_appender = tracing_appender::rolling::hourly(&path, &config.file.file_name);
         let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
         guards.push(guard);
 
-        let file_filter = filter::Targets::new().with_default(conf.file.level.into_level());
-        let file_layer = FormattingLayer::new(service_name, file_writer).with_filter(file_filter);
-        Some(file_layer)
+        let file_filter = get_envfilter(
+            config.file.filtering_directive.as_ref(),
+            config::Level(tracing::Level::WARN),
+            config.file.level,
+            &crates_to_filter,
+        );
+        println!("Using file logging filter: {file_filter}");
+        let layer = FormattingLayer::new(service_name, file_writer, CompactFormatter)?
+            .with_filter(file_filter);
+        Some(layer)
     } else {
         None
     };
 
-    let telemetry_layer = match telemetry {
-        Some(Ok(ref tracer)) => Some(tracing_opentelemetry::layer().with_tracer(tracer.clone())),
-        _ => None,
-    };
-
-    // Use 'RUST_LOG' environment variable will override the config settings
     let subscriber = tracing_subscriber::registry()
-        .with(telemetry_layer)
+        .with(traces_layer)
         .with(StorageSubscription)
-        .with(file_writer)
-        .with(
-            EnvFilter::builder()
-                .with_default_directive(Level::TRACE.into())
-                .from_env_lossy(),
-        );
+        .with(file_writer);
 
-    if conf.console.enabled {
+    // Setup console logging
+    if config.console.enabled {
         let (console_writer, guard) = tracing_appender::non_blocking(std::io::stdout());
         guards.push(guard);
 
-        let level = conf.console.level.into_level();
-        let mut console_filter = filter::Targets::new().with_default(Level::WARN);
-        for acrate in crates_to_watch {
-            console_filter = console_filter.with_target(acrate.as_ref(), level);
-        }
+        let console_filter = get_envfilter(
+            config.console.filtering_directive.as_ref(),
+            config::Level(tracing::Level::WARN),
+            config.console.level,
+            &crates_to_filter,
+        );
+        println!("Using console logging filter: {console_filter}");
 
-        match conf.console.log_format {
+        match config.console.log_format {
             config::LogFormat::Default => {
                 let logging_layer = fmt::layer()
                     .with_timer(fmt::time::time())
-                    .with_span_events(fmt::format::FmtSpan::NONE)
                     .pretty()
-                    .with_writer(console_writer);
-
-                subscriber
-                    .with(logging_layer.with_filter(console_filter))
-                    .init();
+                    .with_writer(console_writer)
+                    .with_filter(console_filter);
+                subscriber.with(logging_layer).init();
             }
             config::LogFormat::Json => {
-                let logging_layer = FormattingLayer::new(service_name, console_writer);
-
-                subscriber.with(logging_layer).init();
+                error_stack::Report::set_color_mode(error_stack::fmt::ColorMode::None);
+                subscriber
+                    .with(
+                        FormattingLayer::new(service_name, console_writer, CompactFormatter)?
+                            .with_filter(console_filter),
+                    )
+                    .init();
+            }
+            config::LogFormat::PrettyJson => {
+                error_stack::Report::set_color_mode(error_stack::fmt::ColorMode::None);
+                subscriber
+                    .with(
+                        FormattingLayer::new(service_name, console_writer, PrettyFormatter::new())?
+                            .with_filter(console_filter),
+                    )
+                    .init();
             }
         }
     } else {
         subscriber.init();
     };
 
-    if let Some(Err(err)) = telemetry {
-        tracing::error!("Failed to create an opentelemetry_otlp tracer: {err}");
-    }
-
-    // Returning the WorkerGuard for logs to be printed until it is dropped
+    // Returning the TelemetryGuard for logs to be printed and metrics to be collected until it is
+    // dropped
     Ok(TelemetryGuard {
         _log_guards: guards,
-        _metric_controller: setup_metrics(),
     })
 }
 
-static HISTOGRAM_BUCKETS: Lazy<[f64; 15]> = Lazy::new(|| {
-    let mut init = 0.01;
-    let mut buckets: [f64; 15] = [0.0; 15];
+fn get_opentelemetry_exporter_config(
+    config: &config::LogTelemetry,
+) -> opentelemetry_otlp::ExportConfig {
+    let mut exporter_config = opentelemetry_otlp::ExportConfig {
+        protocol: opentelemetry_otlp::Protocol::Grpc,
+        endpoint: config.otel_exporter_otlp_endpoint.clone(),
+        ..Default::default()
+    };
 
-    for bucket in &mut buckets {
-        init *= 2.0;
-        *bucket = init;
+    if let Some(timeout) = config.otel_exporter_otlp_timeout {
+        exporter_config.timeout = Duration::from_millis(timeout);
     }
-    buckets
-});
 
-fn setup_metrics() -> Option<BasicController> {
-    opentelemetry_otlp::new_pipeline()
-        .metrics(
-            simple::histogram(*HISTOGRAM_BUCKETS),
-            cumulative_temporality_selector(),
-            runtime::TokioCurrentThread,
+    exporter_config
+}
+
+#[derive(Debug, Clone)]
+enum TraceUrlAssert {
+    Match(String),
+    EndsWith(String),
+}
+
+impl TraceUrlAssert {
+    fn compare_url(&self, url: &str) -> bool {
+        match self {
+            Self::Match(value) => url == value,
+            Self::EndsWith(end) => url.ends_with(end),
+        }
+    }
+}
+
+impl From<String> for TraceUrlAssert {
+    fn from(value: String) -> Self {
+        match value {
+            url if url.starts_with('*') => Self::EndsWith(url.trim_start_matches('*').to_string()),
+            url => Self::Match(url),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TraceAssertion {
+    clauses: Option<Vec<TraceUrlAssert>>,
+    /// default behaviour for tracing if no condition is provided
+    default: bool,
+}
+
+impl TraceAssertion {
+    /// Should the provided url be traced
+    fn should_trace_url(&self, url: &str) -> bool {
+        match &self.clauses {
+            Some(clauses) => clauses.iter().all(|cur| cur.compare_url(url)),
+            None => self.default,
+        }
+    }
+}
+
+/// Conditional Sampler for providing control on url based tracing
+#[derive(Clone, Debug)]
+struct ConditionalSampler<T: opentelemetry_sdk::trace::ShouldSample + Clone + 'static>(
+    TraceAssertion,
+    T,
+);
+
+impl<T: opentelemetry_sdk::trace::ShouldSample + Clone + 'static>
+    opentelemetry_sdk::trace::ShouldSample for ConditionalSampler<T>
+{
+    fn should_sample(
+        &self,
+        parent_context: Option<&opentelemetry::Context>,
+        trace_id: opentelemetry::trace::TraceId,
+        name: &str,
+        span_kind: &opentelemetry::trace::SpanKind,
+        attributes: &[opentelemetry::KeyValue],
+        links: &[opentelemetry::trace::Link],
+    ) -> opentelemetry::trace::SamplingResult {
+        use opentelemetry::trace::TraceContextExt;
+
+        match attributes
+            .iter()
+            .find(|&kv| kv.key == opentelemetry::Key::new("http.route"))
+            .map_or(self.0.default, |inner| {
+                self.0.should_trace_url(&inner.value.as_str())
+            }) {
+            true => {
+                self.1
+                    .should_sample(parent_context, trace_id, name, span_kind, attributes, links)
+            }
+            false => opentelemetry::trace::SamplingResult {
+                decision: opentelemetry::trace::SamplingDecision::Drop,
+                attributes: Vec::new(),
+                trace_state: match parent_context {
+                    Some(ctx) => ctx.span().span_context().trace_state().clone(),
+                    None => opentelemetry::trace::TraceState::default(),
+                },
+            },
+        }
+    }
+}
+
+fn setup_tracing_pipeline(
+    config: &config::LogTelemetry,
+    service_name: &str,
+) -> Option<
+    tracing_opentelemetry::OpenTelemetryLayer<
+        tracing_subscriber::Registry,
+        opentelemetry_sdk::trace::Tracer,
+    >,
+> {
+    use opentelemetry::trace::TracerProvider;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::trace;
+
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
+    // Set the export interval to 1 second
+    let batch_config = trace::BatchConfigBuilder::default()
+        .with_scheduled_delay(Duration::from_millis(1000))
+        .build();
+
+    let exporter_result = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_export_config(get_opentelemetry_exporter_config(config))
+        .build();
+
+    let exporter = if config.ignore_errors {
+        #[allow(clippy::print_stderr)] // The logger hasn't been initialized yet
+        exporter_result
+            .inspect_err(|error| eprintln!("Failed to build traces exporter: {error:?}"))
+            .ok()?
+    } else {
+        // Safety: This is conditional, there is an option to avoid this behavior at runtime.
+        #[allow(clippy::expect_used)]
+        exporter_result.expect("Failed to build traces exporter")
+    };
+
+    let mut provider_builder = trace::TracerProvider::builder()
+        .with_span_processor(
+            trace::BatchSpanProcessor::builder(
+                exporter,
+                // The runtime would have to be updated if a different web framework is used
+                opentelemetry_sdk::runtime::TokioCurrentThread,
+            )
+            .with_batch_config(batch_config)
+            .build(),
         )
-        .with_exporter(
-            opentelemetry_otlp::new_exporter().tonic().with_env(), // can also config it using with_* functions like the tracing part above.
-        )
-        .with_period(Duration::from_secs(3))
-        .with_timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|err| eprintln!("Failed to Setup Metrics with {err:?}"))
-        .ok()
+        .with_sampler(trace::Sampler::ParentBased(Box::new(ConditionalSampler(
+            TraceAssertion {
+                clauses: config
+                    .route_to_trace
+                    .clone()
+                    .map(|inner| inner.into_iter().map(TraceUrlAssert::from).collect()),
+                default: false,
+            },
+            trace::Sampler::TraceIdRatioBased(config.sampling_rate.unwrap_or(1.0)),
+        ))))
+        .with_resource(opentelemetry_sdk::Resource::new(vec![
+            opentelemetry::KeyValue::new("service.name", service_name.to_owned()),
+        ]));
+
+    if config.use_xray_generator {
+        provider_builder = provider_builder
+            .with_id_generator(opentelemetry_aws::trace::XrayIdGenerator::default());
+    }
+
+    Some(
+        tracing_opentelemetry::layer()
+            .with_tracer(provider_builder.build().tracer(service_name.to_owned())),
+    )
+}
+
+fn setup_metrics_pipeline(config: &config::LogTelemetry) {
+    use opentelemetry_otlp::WithExportConfig;
+
+    let exporter_result = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_temporality(opentelemetry_sdk::metrics::Temporality::Cumulative)
+        .with_export_config(get_opentelemetry_exporter_config(config))
+        .build();
+
+    let exporter = if config.ignore_errors {
+        #[allow(clippy::print_stderr)] // The logger hasn't been initialized yet
+        exporter_result
+            .inspect_err(|error| eprintln!("Failed to build metrics exporter: {error:?}"))
+            .ok();
+        return;
+    } else {
+        // Safety: This is conditional, there is an option to avoid this behavior at runtime.
+        #[allow(clippy::expect_used)]
+        exporter_result.expect("Failed to build metrics exporter")
+    };
+
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
+        exporter,
+        // The runtime would have to be updated if a different web framework is used
+        opentelemetry_sdk::runtime::TokioCurrentThread,
+    )
+    .with_interval(Duration::from_secs(3))
+    .with_timeout(Duration::from_secs(10))
+    .build();
+
+    let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(reader)
+        .with_resource(opentelemetry_sdk::Resource::new([
+            opentelemetry::KeyValue::new(
+                "pod",
+                std::env::var("POD_NAME").unwrap_or(String::from("hyperswitch-server-default")),
+            ),
+        ]))
+        .build();
+
+    opentelemetry::global::set_meter_provider(provider);
+}
+
+fn get_envfilter(
+    filtering_directive: Option<&String>,
+    default_log_level: config::Level,
+    filter_log_level: config::Level,
+    crates_to_filter: impl AsRef<[&'static str]>,
+) -> EnvFilter {
+    filtering_directive
+        .map(|filter| {
+            // Try to create target filter from specified filtering directive, if set
+
+            // Safety: If user is overriding the default filtering directive, then we need to panic
+            // for invalid directives.
+            #[allow(clippy::expect_used)]
+            EnvFilter::builder()
+                .with_default_directive(default_log_level.into_level().into())
+                .parse(filter)
+                .expect("Invalid EnvFilter filtering directive")
+        })
+        .unwrap_or_else(|| {
+            // Construct a default target filter otherwise
+            let mut workspace_members = crate::cargo_workspace_members!();
+            workspace_members.extend(crates_to_filter.as_ref());
+
+            workspace_members
+                .drain()
+                .zip(std::iter::repeat(filter_log_level.into_level()))
+                .fold(
+                    EnvFilter::default().add_directive(default_log_level.into_level().into()),
+                    |env_filter, (target, level)| {
+                        // Safety: This is a hardcoded basic filtering directive. If even the basic
+                        // filter is wrong, it's better to panic.
+                        #[allow(clippy::expect_used)]
+                        env_filter.add_directive(
+                            format!("{target}={level}")
+                                .parse()
+                                .expect("Invalid EnvFilter directive format"),
+                        )
+                    },
+                )
+        })
 }

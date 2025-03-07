@@ -1,5 +1,5 @@
 use futures::future::OptionFuture;
-use router::types::{self, api, storage::enums};
+use router::types::{self, domain, storage::enums};
 use serde_json::json;
 use serial_test::serial;
 use wiremock::{
@@ -19,18 +19,20 @@ impl ConnectorActions for Worldpay {}
 impl utils::Connector for Worldpay {
     fn get_data(&self) -> types::api::ConnectorData {
         use router::connector::Worldpay;
-        types::api::ConnectorData {
-            connector: Box::new(&Worldpay),
-            connector_name: types::Connector::Worldpay,
-            get_token: types::api::GetToken::Connector,
-        }
+        utils::construct_connector_data_old(
+            Box::new(Worldpay::new()),
+            types::Connector::Worldpay,
+            types::api::GetToken::Connector,
+            None,
+        )
     }
 
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .worldpay
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration")
+                .into(),
         )
     }
 
@@ -60,15 +62,16 @@ async fn should_authorize_gpay_payment() {
     let response = conn
         .authorize_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Wallet(
-                    api::WalletData::GooglePay(api_models::payments::GooglePayWalletData {
+                payment_method_data: domain::PaymentMethodData::Wallet(
+                    domain::WalletData::GooglePay(domain::GooglePayWalletData {
                         pm_type: "CARD".to_string(),
                         description: "Visa1234567890".to_string(),
-                        info: api_models::payments::GooglePayPaymentMethodInfo {
+                        info: domain::GooglePayPaymentMethodInfo {
                             card_network: "VISA".to_string(),
                             card_details: "1234".to_string(),
+                            assurance_details: None,
                         },
-                        tokenization_data: api_models::payments::GpayTokenizationData {
+                        tokenization_data: domain::GpayTokenizationData {
                             token_type: "worldpay".to_string(),
                             token: "someToken".to_string(),
                         },
@@ -95,11 +98,11 @@ async fn should_authorize_applepay_payment() {
     let response = conn
         .authorize_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Wallet(
-                    api::WalletData::ApplePay(api_models::payments::ApplePayWalletData {
+                payment_method_data: domain::PaymentMethodData::Wallet(
+                    domain::WalletData::ApplePay(domain::ApplePayWalletData {
                         payment_data: "someData".to_string(),
                         transaction_identifier: "someId".to_string(),
-                        payment_method: api_models::payments::ApplepayPaymentMethod {
+                        payment_method: domain::ApplepayPaymentMethod {
                             display_name: "someName".to_string(),
                             network: "visa".to_string(),
                             pm_type: "card".to_string(),
@@ -147,7 +150,7 @@ async fn should_sync_payment() {
     let response = connector
         .sync_payment(
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     "112233".to_string(),
                 ),
                 ..Default::default()

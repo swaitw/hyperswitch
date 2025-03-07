@@ -41,7 +41,7 @@ fn basic() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     // clone
-
+    #[allow(clippy::redundant_clone)] // We are asserting that the cloned value is equal
     let composite2 = composite.clone();
     assert_eq!(composite, composite2);
 
@@ -117,7 +117,7 @@ fn without_serialize() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 #[test]
 fn for_string() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    #[cfg_attr(feature = "serde", derive(Serialize))]
+    #[cfg_attr(all(feature = "alloc", feature = "serde"), derive(Serialize))]
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Composite {
         secret_number: Secret<String>,
@@ -134,7 +134,7 @@ fn for_string() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     // clone
-
+    #[allow(clippy::redundant_clone)] // We are asserting that the cloned value is equal
     let composite2 = composite.clone();
     assert_eq!(composite, composite2);
 
@@ -147,7 +147,7 @@ fn for_string() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // serialize
 
-    #[cfg(feature = "serde")]
+    #[cfg(all(feature = "alloc", feature = "serde"))]
     {
         let got = serde_json::to_string(&composite).unwrap();
         let exp = r#"{"secret_number":"abc","not_secret":"not secret"}"#;

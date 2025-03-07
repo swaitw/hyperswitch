@@ -1,6 +1,4 @@
-//!
 //! Abstract data types.
-//!
 
 use crate::Secret;
 
@@ -8,6 +6,9 @@ use crate::Secret;
 pub trait PeekInterface<S> {
     /// Only method providing access to the secret value.
     fn peek(&self) -> &S;
+
+    /// Provide a mutable reference to the inner value.
+    fn peek_mut(&mut self) -> &mut S;
 }
 
 /// Interface that consumes a option secret and returns the value.
@@ -38,5 +39,27 @@ where
 {
     fn expose(self) -> S {
         self.inner_secret
+    }
+}
+
+/// Interface that consumes a secret and converts it to a secret with a different masking strategy.
+pub trait SwitchStrategy<FromStrategy, ToStrategy> {
+    /// The type returned by `switch_strategy()`.
+    type Output;
+
+    /// Consumes the secret and converts it to a secret with a different masking strategy.
+    fn switch_strategy(self) -> Self::Output;
+}
+
+impl<S, FromStrategy, ToStrategy> SwitchStrategy<FromStrategy, ToStrategy>
+    for Secret<S, FromStrategy>
+where
+    FromStrategy: crate::Strategy<S>,
+    ToStrategy: crate::Strategy<S>,
+{
+    type Output = Secret<S, ToStrategy>;
+
+    fn switch_strategy(self) -> Self::Output {
+        Secret::new(self.inner_secret)
     }
 }

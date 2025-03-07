@@ -1,6 +1,8 @@
-use api_models::payments::PaymentMethodData;
+use std::str::FromStr;
+
+use common_utils::types::MinorUnit;
 use masking::Secret;
-use router::types::{self, api, storage::enums};
+use router::types::{self, domain, storage::enums};
 
 use crate::{
     connector_auth,
@@ -13,18 +15,20 @@ impl ConnectorActions for BamboraTest {}
 impl utils::Connector for BamboraTest {
     fn get_data(&self) -> types::api::ConnectorData {
         use router::connector::Bambora;
-        types::api::ConnectorData {
-            connector: Box::new(&Bambora),
-            connector_name: types::Connector::Bambora,
-            get_token: types::api::GetToken::Connector,
-        }
+        utils::construct_connector_data_old(
+            Box::new(&Bambora),
+            types::Connector::Bambora,
+            types::api::GetToken::Connector,
+            None,
+        )
     }
 
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .bambora
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration")
+                .into(),
         )
     }
 
@@ -37,8 +41,8 @@ static CONNECTOR: BamboraTest = BamboraTest {};
 
 fn get_default_payment_authorize_data() -> Option<types::PaymentsAuthorizeData> {
     Some(types::PaymentsAuthorizeData {
-        payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-            card_number: Secret::new("4030000010001234".to_string()),
+        payment_method_data: domain::PaymentMethodData::Card(domain::Card {
+            card_number: cards::CardNumber::from_str("4030000010001234").unwrap(),
             card_exp_year: Secret::new("25".to_string()),
             card_cvc: Secret::new("123".to_string()),
             ..utils::CCardType::default().0
@@ -75,7 +79,7 @@ async fn should_partially_capture_authorized_payment() {
         .authorize_and_capture_payment(
             get_default_payment_authorize_data(),
             Some(types::PaymentsCaptureData {
-                amount_to_capture: Some(50),
+                amount_to_capture: 50,
                 ..utils::PaymentCaptureType::default().0
             }),
             None,
@@ -97,12 +101,20 @@ async fn should_sync_authorized_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Authorized,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                mandate_id: None,
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 encoded_data: None,
-                capture_method: None,
+                capture_method: Some(diesel_models::enums::CaptureMethod::Manual),
+                sync_type: types::SyncRequestType::SinglePaymentSync,
                 connector_meta: None,
+                payment_method_type: None,
+                currency: enums::Currency::USD,
+                payment_experience: None,
+                integrity_object: None,
+                amount: MinorUnit::new(100),
+                ..Default::default()
             }),
             None,
         )
@@ -209,12 +221,20 @@ async fn should_sync_auto_captured_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Charged,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                mandate_id: None,
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     txn_id.unwrap(),
                 ),
                 encoded_data: None,
                 capture_method: Some(enums::CaptureMethod::Automatic),
+                sync_type: types::SyncRequestType::SinglePaymentSync,
                 connector_meta: None,
+                payment_method_type: None,
+                currency: enums::Currency::USD,
+                payment_experience: None,
+                integrity_object: None,
+                amount: MinorUnit::new(100),
+                ..Default::default()
             }),
             None,
         )
@@ -278,15 +298,15 @@ async fn should_sync_refund() {
     );
 }
 
-// Cards Negative scenerios
+// Cards Negative scenarios
 // Creates a payment with incorrect card number.
 #[actix_web::test]
 async fn should_fail_payment_for_incorrect_card_number() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new("1234567891011".to_string()),
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
+                    card_number: cards::CardNumber::from_str("1234567891011").unwrap(),
                     card_exp_year: Secret::new("25".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -302,36 +322,13 @@ async fn should_fail_payment_for_incorrect_card_number() {
     );
 }
 
-// Creates a payment with empty card number.
-#[actix_web::test]
-async fn should_fail_payment_for_empty_card_number() {
-    let response = CONNECTOR
-        .make_payment(
-            Some(types::PaymentsAuthorizeData {
-                payment_method_data: PaymentMethodData::Card(api::Card {
-                    card_number: Secret::new(String::from("")),
-                    ..utils::CCardType::default().0
-                }),
-                ..utils::PaymentAuthorizeType::default().0
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let x = response.response.unwrap_err();
-    assert_eq!(
-        x.reason,
-        Some(r#"[{"field":"card:number","message":"Invalid Card Number"},{"field":"card:expiry_year","message":"Invalid expiration year"}]"#.to_string()),
-    );
-}
-
 // Creates a payment with incorrect CVC.
 #[actix_web::test]
 async fn should_fail_payment_for_incorrect_cvc() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_year: Secret::new("25".to_string()),
                     card_cvc: Secret::new("12345".to_string()),
                     ..utils::CCardType::default().0
@@ -354,9 +351,9 @@ async fn should_fail_payment_for_invalid_exp_month() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_month: Secret::new("20".to_string()),
-                    card_number: Secret::new("4030000010001234".to_string()),
+                    card_number: cards::CardNumber::from_str("4030000010001234").unwrap(),
                     card_exp_year: Secret::new("25".to_string()),
                     card_cvc: Secret::new("123".to_string()),
                     ..utils::CCardType::default().0
@@ -379,9 +376,9 @@ async fn should_fail_payment_for_incorrect_expiry_year() {
     let response = CONNECTOR
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_year: Secret::new("2000".to_string()),
-                    card_number: Secret::new("4030000010001234".to_string()),
+                    card_number: cards::CardNumber::from_str("4030000010001234").unwrap(),
                     card_cvc: Secret::new("123".to_string()),
                     ..utils::CCardType::default().0
                 }),
